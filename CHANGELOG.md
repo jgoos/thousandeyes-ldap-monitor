@@ -41,5 +41,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Security
 - Uses ThousandEyes Secure Credentials for authentication
 - No plaintext passwords in code or logs
-- Supports TLS 1.2+ for LDAPS connections
+- Supports TLS 1.2 and 1.3 for LDAPS connections
 - Credentials encrypted at rest 

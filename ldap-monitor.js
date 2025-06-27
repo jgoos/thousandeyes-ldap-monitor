@@ -23,6 +23,7 @@ async function runTest() {
   const filter    = '(objectClass=*)';   // match-all filter
   const retryDelayMs = 100;              // delay between retries
   const maxRetries = 2;                  // max retry attempts for transient failures
+  const tlsMinVersion = 'TLSv1.2';      // minimum TLS version (supports 1.2, 1.3)
   /* ───────────────────────────────────────────── */
 
   /* Secure secrets        (Settings ▸ Secure Credentials) */
@@ -78,8 +79,10 @@ async function runTest() {
       /* 1 ▸ open socket (TLS if port 636) */
       metrics.connectionStart = Date.now();
       sock = (port === 636)
-          ? await net.connectTls(port, host, { minVersion:'TLSv1.2' })
-          : await net.connect   (port, host);
+          ? await net.connectTls(port, host, { 
+              minVersion: tlsMinVersion  // TLS 1.2 minimum, will use 1.3 if available
+            })
+          : await net.connect(port, host);
       sock.setTimeout(timeoutMs);
       metrics.connectionEnd = Date.now();
       

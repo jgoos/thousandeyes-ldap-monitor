@@ -12,7 +12,7 @@ This repository contains a JavaScript monitoring script designed for ThousandEye
 - Executes fast base-scope searches against Root DSE
 - Measures and reports round-trip times for both operations
 - Alerts when operations exceed configurable thresholds (default: 300ms)
-- Supports both LDAP (port 389) and LDAPS (port 636) with TLS 1.2+
+- Supports both LDAP (port 389) and LDAPS (port 636) with TLS 1.2/1.3
 
 ## Repository Structure
 
@@ -109,6 +109,7 @@ const timeoutMs = 5000;                // socket timeout
 const slowMs    = 300;                 // alert threshold in ms
 const baseDN    = '';                  // '' = Root DSE (fastest search)
 const filter    = '(objectClass=*)';   // match-all filter
+const tlsMinVersion = 'TLSv1.2';      // minimum TLS version (supports 1.2, 1.3)
 ```
 
 Modify these values according to your LDAP server configuration before deploying.
@@ -150,6 +151,7 @@ The script will throw errors (causing test failure) if:
 2. Check firewall rules between the agent and LDAP server
 3. For LDAPS (port 636), ensure TLS certificates are valid
 4. Test connectivity manually: `telnet ldap.example.com 636`
+5. Verify TLS version compatibility (script requires TLS 1.2 minimum, supports 1.3)
 
 #### "Bind failed: invalidCredentials"
 **Cause:** The bind DN or password is incorrect.
@@ -271,7 +273,7 @@ To contribute improvements to this monitoring script:
 - Use ThousandEyes Secure Credentials for all sensitive data
 - Regularly rotate monitoring account passwords
 - Use read-only accounts with minimal permissions
-- Enable LDAPS (TLS) for encrypted communications
+- Enable LDAPS (TLS) for encrypted communications (supports TLS 1.2 and 1.3)
 - Monitor from trusted network segments when possible
 
 ## License

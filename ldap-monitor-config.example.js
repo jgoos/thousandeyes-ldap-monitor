@@ -23,7 +23,7 @@ export const ldapConfig = {
   
   // TLS options (for LDAPS)
   tlsOptions: {
-    minVersion: 'TLSv1.2',         // Minimum TLS version
+    minVersion: 'TLSv1.2',         // Minimum TLS version (will use 1.3 if available)
     // rejectUnauthorized: true,   // Verify server certificate (if supported)
   }
 };
