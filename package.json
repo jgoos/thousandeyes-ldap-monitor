@@ -1,0 +1,38 @@
+{
+  "name": "thousandeyes-ldap-monitor",
+  "version": "1.0.0",
+  "description": "Self-contained ThousandEyes script that performs LDAP/LDAPS bind + search operations and alerts on latency. Only ldap-monitor.js is used in ThousandEyes platform.",
+  "main": "ldap-monitor.js",
+  "scripts": {
+    "test": "echo \"Note: This script is designed to run within ThousandEyes platform\" && exit 0",
+    "lint": "echo \"Add your linting tool here\"",
+    "validate": "node --check ldap-monitor.js"
+  },
+  "keywords": [
+    "thousandeyes",
+    "ldap",
+    "ldaps",
+    "monitoring",
+    "synthetic-monitoring",
+    "performance",
+    "health-check"
+  ],
+  "author": "",
+  "license": "MIT",
+  "engines": {
+    "node": ">=14.0.0"
+  },
+  "devDependencies": {},
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/yourusername/thousandeyes-ldap-monitor.git"
+  },
+  "bugs": {
+    "url": "https://github.com/yourusername/thousandeyes-ldap-monitor/issues"
+  },
+  "files": [
+    "ldap-monitor.js",
+    "ldap-monitor-config.example.js",
+    "README.md"
+  ]
+} 
