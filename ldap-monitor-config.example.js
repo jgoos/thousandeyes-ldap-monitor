@@ -19,7 +19,7 @@ export const ldapConfig = {
   
   // Search parameters
   baseDN: '',                      // Base DN for search ('' = Root DSE)
-  filter: '(objectClass=*)',       // LDAP search filter
+  filterAttr: 'objectClass',       // LDAP search attribute
   
   // TLS options (for LDAPS)
   tlsOptions: {
@@ -37,7 +37,7 @@ export const activeDirectoryConfig = {
   timeoutMs: 5000,
   slowMs: 500,  // AD can be slower
   baseDN: 'DC=corp,DC=example,DC=com',
-  filter: '(objectClass=*)'
+  filterAttr: 'objectClass'
 };
 
 // OpenLDAP example
@@ -47,7 +47,7 @@ export const openLdapConfig = {
   timeoutMs: 3000,
   slowMs: 200,
   baseDN: 'dc=example,dc=org',
-  filter: '(objectClass=*)'
+  filterAttr: 'objectClass'
 };
 
 // Load balancer health check example
@@ -57,5 +57,5 @@ export const loadBalancerConfig = {
   timeoutMs: 2000,  // Shorter timeout for LB checks
   slowMs: 150,      // Tighter SLA for load balanced setup
   baseDN: '',       // Root DSE for fastest response
-  filter: '(objectClass=*)'
+  filterAttr: 'objectClass'
 }; 

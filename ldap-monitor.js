@@ -12,18 +12,33 @@
 
 import { net, credentials } from 'thousandeyes';
 
+// Configuration object so values can be easily customized
+const cfg = {
+  host: 'ldap.example.com',  // FQDN or IP
+  port: 636,                 // 389 = LDAP, 636 = LDAPS
+  timeoutMs: 5000,           // socket timeout
+  slowMs: 300,               // alert threshold in ms
+  baseDN: '',                // '' = Root DSE  (fastest search)
+  filterAttr: 'objectClass', // attribute for present filter
+  retryDelayMs: 100,         // delay between retries
+  maxRetries: 2,             // max retry attempts for transient failures
+  tlsMinVersion: 'TLSv1.2'   // minimum TLS version (supports 1.2, 1.3)
+};
+
 async function runTest() {
 
   /* ─────────── user-tunable settings ─────────── */
-  const host      = 'ldap.example.com';  // FQDN or IP
-  const port      = 636;                 // 389 = LDAP, 636 = LDAPS
-  const timeoutMs = 5000;                // socket timeout
-  const slowMs    = 300;                 // alert threshold in ms
-  const baseDN    = '';                  // '' = Root DSE  (fastest search)
-  const filter    = '(objectClass=*)';   // match-all filter
-  const retryDelayMs = 100;              // delay between retries
-  const maxRetries = 2;                  // max retry attempts for transient failures
-  const tlsMinVersion = 'TLSv1.2';      // minimum TLS version (supports 1.2, 1.3)
+  const {
+    host,
+    port,
+    timeoutMs,
+    slowMs,
+    baseDN,
+    filterAttr,
+    retryDelayMs,
+    maxRetries,
+    tlsMinVersion
+  } = cfg;
   /* ───────────────────────────────────────────── */
 
   /* Secure secrets        (Settings ▸ Secure Credentials) */
@@ -39,6 +54,10 @@ async function runTest() {
     throw new Error(`Invalid port ${port}: Must be 389 (LDAP) or 636 (LDAPS)`);
   }
 
+  if (slowMs <= 0) {
+    throw new Error('Invalid slowMs threshold: must be greater than 0');
+  }
+
   /* ---------- tiny BER helpers so we don't hard-code hex ---------- */
   /**
    * Generic Tag-Length-Value builder for BER encoding
@@ -46,17 +65,28 @@ async function runTest() {
    * @param {Buffer} payload - Value to encode
    * @returns {Buffer} TLV-encoded buffer
    */
+  // Encode BER length (supports multi-byte lengths)
+  const berLen = (len) => {
+    if (len < 0x80) return Buffer.from([len]);
+    const bytes = [];
+    while (len > 0) {
+      bytes.unshift(len & 0xff);
+      len >>= 8;
+    }
+    return Buffer.from([0x80 | bytes.length, ...bytes]);
+  };
+
   const tlv  = (tag, payload) =>
-    Buffer.concat([Buffer.from([tag, payload.length]), payload]);
+    Buffer.concat([Buffer.from([tag]), berLen(payload.length), payload]);
   
   /** Encode INTEGER */
   const int  = n   => tlv(0x02, Buffer.from([n]));
   
   /** Encode OCTET STRING */
-  const str  = s   => tlv(0x04, Buffer.from(s, 'utf8'));
+  const str  = (s) => tlv(0x04, Buffer.from(s, 'utf8'));
   
   /** Context-specific tag 0 for simple authentication */
-  const ctx0 = b   => Buffer.concat([Buffer.from([0x80, b.length]), b]);
+  const ctx0 = (b) => Buffer.concat([Buffer.from([0x80]), berLen(b.length), b]);
   /* ---------------------------------------------------------------- */
 
   /* Performance metrics collector */
@@ -70,7 +100,6 @@ async function runTest() {
   };
 
   let sock;
-  let lastError;
   let attempt = 0;
 
   /* Retry loop for transient failures */
@@ -78,11 +107,19 @@ async function runTest() {
     try {
       /* 1 ▸ open socket (TLS if port 636) */
       metrics.connectionStart = Date.now();
-      sock = (port === 636)
-          ? await net.connectTls(port, host, { 
-              minVersion: tlsMinVersion  // TLS 1.2 minimum, will use 1.3 if available
+      const connectPromise = (port === 636)
+          ? net.connectTls(port, host, {
+              minVersion: tlsMinVersion,
+              rejectUnauthorized: true,
+              servername: host
             })
-          : await net.connect(port, host);
+          : net.connect(port, host);
+
+      sock = await Promise.race([
+        connectPromise,
+        new Promise((_, reject) =>
+          setTimeout(() => reject(new Error('Connection timeout')), timeoutMs))
+      ]);
       sock.setTimeout(timeoutMs);
       metrics.connectionEnd = Date.now();
       
@@ -91,7 +128,6 @@ async function runTest() {
       
       break; // Success, exit retry loop
     } catch (err) {
-      lastError = err;
       attempt++;
       if (attempt > maxRetries) {
         throw new Error(`Connection failed after ${maxRetries + 1} attempts: ${err.message}`);
@@ -160,7 +196,10 @@ async function runTest() {
       Buffer.from([0x02,0x02,0x03,0xE8]), // sizeLimit 1000
       Buffer.from([0x02,0x02,0x00,0x00]), // timeLimit 0
       Buffer.from([0x01,0x01,0x00]),      // typesOnly FALSE
-      Buffer.concat([Buffer.from([0x87, filter.length]), Buffer.from(filter)]),
+      (() => {
+        const attrBuf = Buffer.from(filterAttr, 'utf8');
+        return Buffer.concat([Buffer.from([0x87]), berLen(attrBuf.length), attrBuf]);
+      })(),
       Buffer.from([0x30,0x00])            // attributes = none
     ]);
 
@@ -174,8 +213,18 @@ async function runTest() {
 
     metrics.searchStart = Date.now();
     await sock.writeAll(searchReq);
-    const searchRsp = await sock.read();
+
+    const searchChunks = [];
+    while (true) {
+      const chunk = await sock.read();
+      if (!chunk) {
+        throw new Error('Search failed: connection closed before completion');
+      }
+      searchChunks.push(chunk);
+      if (chunk.includes(0x65)) break; // SearchResultDone
+    }
     metrics.searchEnd = Date.now();
+    const searchRsp = Buffer.concat(searchChunks);
     
     const searchRTT = metrics.searchEnd - metrics.searchStart;
     console.log(`Search RTT: ${searchRTT} ms`);
@@ -187,6 +236,15 @@ async function runTest() {
     
     if (searchRsp[8] !== 0x64) {
       throw new Error(`Search failed: Unexpected response type 0x${searchRsp[8].toString(16)} (expected 0x64 SearchResultEntry)`);
+    }
+
+    const doneIndex = searchRsp.lastIndexOf(0x65);
+    if (doneIndex === -1 || doneIndex + 4 >= searchRsp.length) {
+      throw new Error('Search failed: No SearchResultDone message');
+    }
+    const searchResultCode = searchRsp[doneIndex + 4];
+    if (searchResultCode !== 0x00) {
+      throw new Error(`Search failed: code 0x${searchResultCode.toString(16)}`);
     }
     
     if (searchRTT > slowMs) {
@@ -206,10 +264,17 @@ async function runTest() {
   } finally {
     /* Ensure socket is always closed */
     if (sock) {
-      await sock.end();
+      try {
+        await sock.end();
+      } catch (closeErr) {
+        console.error(`Error closing socket: ${closeErr.message}`);
+      }
     }
   }
 }
 
-// Execute the test
-runTest(); 
+// Execute the test with proper error handling
+runTest().catch(err => {
+  console.error('Test failed:', err.message);
+  throw err;
+});
