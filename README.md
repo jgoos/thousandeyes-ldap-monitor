@@ -105,11 +105,17 @@ The script includes user-tunable settings at the top:
 ```javascript
 const host      = 'ldap.example.com';  // FQDN or IP
 const port      = 636;                 // 389 = LDAP, 636 = LDAPS
-const timeoutMs = 5000;                // socket timeout
-const slowMs    = 300;                 // alert threshold in ms
-const baseDN    = '';                  // '' = Root DSE (fastest search)
-const filter    = '(objectClass=*)';   // match-all filter
-const tlsMinVersion = 'TLSv1.2';      // minimum TLS version (supports 1.2, 1.3)
+const cfg = {
+  host: 'ldap.example.com',
+  port: 636,
+  timeoutMs: 5000,
+  slowMs: 300,
+  baseDN: '',
+  filterAttr: 'objectClass',
+  retryDelayMs: 100,
+  maxRetries: 2,
+  tlsMinVersion: 'TLSv1.2'
+};
 ```
 
 Modify these values according to your LDAP server configuration before deploying.
@@ -191,7 +197,7 @@ Different LDAP implementations have different performance characteristics:
 #### Optimizing Search Operations
 - Use Root DSE (`baseDN = ''`) for fastest response times
 - Limit search scope to `base` (already configured)
-- Use simple filters like `(objectClass=*)`
+- Use simple present filters such as the `objectClass` attribute
 
 ### Testing Outside ThousandEyes
 
