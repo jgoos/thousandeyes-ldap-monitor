@@ -25,10 +25,10 @@
   "devDependencies": {},
   "repository": {
     "type": "git",
-    "url": "https://github.com/yourusername/thousandeyes-ldap-monitor.git"
+    "url": "https://github.com/jgoos/thousandeyes-ldap-monitor.git"
   },
   "bugs": {
-    "url": "https://github.com/yourusername/thousandeyes-ldap-monitor/issues"
+    "url": "https://github.com/jgoos/thousandeyes-ldap-monitor/issues"
   },
   "files": [
     "ldap-monitor.js",
