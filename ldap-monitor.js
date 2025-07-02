@@ -10,7 +10,7 @@
  *   ldapMonPass  →  password
  */
 
-import { net, credentials } from 'thousandeyes';
+import { net, credentials, test, markers } from 'thousandeyes';
 
 // Configuration object so values can be easily customized
 const cfg = {
@@ -39,6 +39,8 @@ async function runTest() {
     maxRetries,
     tlsMinVersion
   } = cfg;
+  const { timeout } = test.getSettings();
+  const effectiveTimeoutMs = timeout || timeoutMs;
   /* ───────────────────────────────────────────── */
 
   /* Secure secrets        (Settings ▸ Secure Credentials) */
@@ -104,9 +106,11 @@ async function runTest() {
 
   /* Retry loop for transient failures */
   while (attempt <= maxRetries) {
+    markers.start(`retry-${attempt}`);
     try {
       /* 1 ▸ open socket (TLS if port 636) */
       metrics.connectionStart = Date.now();
+      markers.start('connect');
       const connectPromise = (port === 636)
           ? net.connectTls(port, host, {
               minVersion: tlsMinVersion,
@@ -118,16 +122,26 @@ async function runTest() {
       sock = await Promise.race([
         connectPromise,
         new Promise((_, reject) =>
-          setTimeout(() => reject(new Error('Connection timeout')), timeoutMs))
+          setTimeout(() => reject(new Error('Connection timeout')), effectiveTimeoutMs))
       ]);
-      sock.setTimeout(timeoutMs);
+      sock.setTimeout(effectiveTimeoutMs);
       metrics.connectionEnd = Date.now();
-      
+      markers.stop('connect');
+
+      if (port === 636) {
+        const cipher = sock.getCipher?.();
+        const cert = sock.getPeerCertificate?.();
+        const cn = cert?.subject?.CN;
+        console.log(`TLS cipher: ${cipher?.name || 'unknown'}; peer CN: ${cn || 'unknown'}`);
+      }
+
       const connectionTime = metrics.connectionEnd - metrics.connectionStart;
       console.log(`Connection established in ${connectionTime} ms`);
-      
+      markers.stop(`retry-${attempt}`);
       break; // Success, exit retry loop
     } catch (err) {
+      markers.stop('connect');
+      markers.stop(`retry-${attempt}`);
       attempt++;
       if (attempt > maxRetries) {
         throw new Error(`Connection failed after ${maxRetries + 1} attempts: ${err.message}`);
@@ -136,6 +150,8 @@ async function runTest() {
       await new Promise(resolve => setTimeout(resolve, retryDelayMs));
     }
   }
+
+  test.setVariable('retries', attempt);
 
   try {
     /* 2 ▸ LDAPv3 simple-bind  (messageID = 1) */
@@ -153,40 +169,47 @@ async function runTest() {
       ])
     );
 
+    let bindRTT;
     metrics.bindStart = Date.now();
-    await sock.writeAll(bindReq);
-    const bindRsp = await sock.read();
-    metrics.bindEnd = Date.now();
-    
-    const bindRTT = metrics.bindEnd - metrics.bindStart;
-    console.log(`Bind RTT: ${bindRTT} ms`);
+    markers.start('bind');
+    try {
+      await sock.writeAll(bindReq);
+      const bindRsp = await sock.read();
+      metrics.bindEnd = Date.now();
 
-    /* Enhanced bind response validation */
-    if (!bindRsp?.length) {
-      throw new Error('Bind failed: No response received from server');
+      bindRTT = metrics.bindEnd - metrics.bindStart;
+      console.log(`Bind RTT: ${bindRTT} ms`);
+
+      /* Enhanced bind response validation */
+      if (!bindRsp?.length) {
+        throw new Error('Bind failed: No response received from server');
+      }
+
+      if (bindRsp[8] !== 0x61) {
+        throw new Error(`Bind failed: Unexpected response type 0x${bindRsp[8].toString(16)} (expected 0x61)`);
+      }
+
+      // Check result code (should be at position 12 for success = 0)
+      if (bindRsp.length > 12 && bindRsp[12] !== 0x00) {
+        const resultCode = bindRsp[12];
+        const errorMessages = {
+          0x01: 'operationsError',
+          0x07: 'authMethodNotSupported',
+          0x08: 'strongerAuthRequired',
+          0x31: 'invalidCredentials',
+          0x32: 'insufficientAccessRights'
+        };
+        const errorMsg = errorMessages[resultCode] || `code 0x${resultCode.toString(16)}`;
+        throw new Error(`Bind failed: ${errorMsg}`);
+      }
+
+      if (bindRTT > slowMs) {
+        throw new Error(`Slow bind: ${bindRTT} ms (>${slowMs}ms threshold)`);
+      }
+    } finally {
+      markers.stop('bind');
     }
     
-    if (bindRsp[8] !== 0x61) {
-      throw new Error(`Bind failed: Unexpected response type 0x${bindRsp[8].toString(16)} (expected 0x61)`);
-    }
-    
-    // Check result code (should be at position 12 for success = 0)
-    if (bindRsp.length > 12 && bindRsp[12] !== 0x00) {
-      const resultCode = bindRsp[12];
-      const errorMessages = {
-        0x01: 'operationsError',
-        0x07: 'authMethodNotSupported', 
-        0x08: 'strongerAuthRequired',
-        0x31: 'invalidCredentials',
-        0x32: 'insufficientAccessRights'
-      };
-      const errorMsg = errorMessages[resultCode] || `code 0x${resultCode.toString(16)}`;
-      throw new Error(`Bind failed: ${errorMsg}`);
-    }
-    
-    if (bindRTT > slowMs) {
-      throw new Error(`Slow bind: ${bindRTT} ms (>${slowMs}ms threshold)`);
-    }
 
     /* 3 ▸ base-scope search  (messageID = 2) */
     const searchReqBody = Buffer.concat([
@@ -212,20 +235,26 @@ async function runTest() {
     );
 
     metrics.searchStart = Date.now();
-    await sock.writeAll(searchReq);
+    markers.start('search');
+    let searchRsp;
+    try {
+      await sock.writeAll(searchReq);
 
-    const searchChunks = [];
-    while (true) {
-      const chunk = await sock.read();
-      if (!chunk) {
-        throw new Error('Search failed: connection closed before completion');
+      const searchChunks = [];
+      while (true) {
+        const chunk = await sock.read();
+        if (!chunk) {
+          throw new Error('Search failed: connection closed before completion');
+        }
+        searchChunks.push(chunk);
+        if (chunk.includes(0x65)) break; // SearchResultDone
       }
-      searchChunks.push(chunk);
-      if (chunk.includes(0x65)) break; // SearchResultDone
+      metrics.searchEnd = Date.now();
+      searchRsp = Buffer.concat(searchChunks);
+    } finally {
+      markers.stop('search');
     }
-    metrics.searchEnd = Date.now();
-    const searchRsp = Buffer.concat(searchChunks);
-    
+
     const searchRTT = metrics.searchEnd - metrics.searchStart;
     console.log(`Search RTT: ${searchRTT} ms`);
 
