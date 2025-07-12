@@ -20,8 +20,7 @@ While ThousandEyes only supports single-file scripts, this repository includes a
 
 - **`ldap-monitor.js`** - The main monitoring script (copy this to ThousandEyes)
 - **`ldap-monitor-config.example.js`** - Example configurations for different LDAP server types (reference only)
-- **`README.md`** - Setup instructions and documentation
-- **`CHANGELOG.md`** - Version history and improvements
+- **`docs/README.md`** - Setup instructions and documentation
 - **`package.json`** - Project metadata
 - **`.gitignore`** - Version control configuration
 
