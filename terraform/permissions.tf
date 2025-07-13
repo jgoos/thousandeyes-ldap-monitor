@@ -1,15 +1,17 @@
 resource "thousandeyes_role" "monitoring_config_admin" {
-  name        = "Monitoring Config Administrator"
-  description = "Role for managing LDAP monitoring resources"
+  name        = "Monitoring Administrator"
   permissions = [
-    "Edit tests",
+    "View tests",
+    "Edit tests and run instant tests",
+    "View alert rules",
     "Edit alert rules",
+    "View test templates",
     "Edit test templates",
-    "View all agents"
+    "View agents in account group"
   ]
 }
 
-resource "thousandeyes_group" "monitoring_config" {
-  name  = "ThousandEyes Monitoring Config"
-  roles = [thousandeyes_role.monitoring_config_admin.id]
+resource "thousandeyes_account_group" "monitoring_config" {
+  account_group_name = "ThousandEyes Monitoring Config"
+  # Note: This group will be used to assign users with the Monitoring Administrator role
 }
