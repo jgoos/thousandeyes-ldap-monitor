@@ -12,22 +12,50 @@
 
 import { net, credentials, test, markers } from 'thousandeyes';
 
-// Configuration object so values can be easily customized
-const cfg = {
-  host: 'ldap.example.com',  // FQDN or IP
-  port: 636,                 // 389 = LDAP, 636 = LDAPS
-  timeoutMs: 5000,           // socket timeout
-  slowMs: 300,               // alert threshold in ms
-  baseDN: '',                // '' = Root DSE  (fastest search)
-  filterAttr: 'objectClass', // attribute for present filter
-  retryDelayMs: 100,         // delay between retries
-  maxRetries: 2,             // max retry attempts for transient failures
-  tlsMinVersion: 'TLSv1.2'   // minimum TLS version (supports 1.2, 1.3)
+/**
+ * Get configuration from ThousandEyes test variables with fallback defaults
+ * This allows each test instance to monitor different LDAP servers
+ */
+const getTestConfig = () => {
+  // Get test settings and variables defensively for TypeScript compatibility
+  let testVars = {};
+  let testTimeout = null;
+  
+  if (test && 'getSettings' in test) {
+    try {
+      const getSettingsMethod = test['getSettings'];
+      if (typeof getSettingsMethod === 'function') {
+        const settings = getSettingsMethod.call(test);
+        if (settings) {
+          testTimeout = settings.timeout;
+          testVars = settings.variables || {};
+        }
+      }
+    } catch (e) {
+      // Ignore if getSettings fails
+    }
+  }
+
+  // Configuration with ThousandEyes test variables (with sensible defaults)
+  return {
+    host: testVars.ldapHost || 'ldap.example.com',          // REQUIRED: Set in test variables
+    port: parseInt(testVars.ldapPort) || 636,               // 389 = LDAP, 636 = LDAPS
+    timeoutMs: parseInt(testVars.timeoutMs) || testTimeout || 5000, // socket timeout
+    slowMs: parseInt(testVars.slowMs) || 300,               // alert threshold in ms
+    baseDN: testVars.baseDN || '',                          // '' = Root DSE (fastest search)
+    filterAttr: testVars.filterAttr || 'objectClass',      // attribute for present filter
+    retryDelayMs: parseInt(testVars.retryDelayMs) || 100,   // delay between retries
+    maxRetries: parseInt(testVars.maxRetries) || 2,         // max retry attempts
+    tlsMinVersion: testVars.tlsMinVersion || 'TLSv1.2',     // minimum TLS version
+    serverName: testVars.serverName || testVars.ldapHost || 'LDAP Server' // For identification
+  };
 };
 
 async function runTest() {
+  // Get dynamic configuration from test variables
+  const cfg = getTestConfig();
 
-  /* ─────────── user-tunable settings ─────────── */
+  /* ─────────── dynamic configuration loaded ─────────── */
   const {
     host,
     port,
@@ -37,19 +65,14 @@ async function runTest() {
     filterAttr,
     retryDelayMs,
     maxRetries,
-    tlsMinVersion
+    tlsMinVersion,
+    serverName
   } = cfg;
-  // Get test settings defensively for TypeScript compatibility
-  let timeout = null;
-  if (test && 'getSettings' in test && typeof test.getSettings === 'function') {
-    try {
-      const settings = test.getSettings();
-      timeout = settings && settings.timeout;
-    } catch (e) {
-      // Ignore if getSettings fails
-    }
-  }
-  const effectiveTimeoutMs = timeout || timeoutMs;
+  
+  // Log which server we're testing for clarity
+  console.log(`Testing LDAP server: ${serverName} (${host}:${port})`);
+  
+  const effectiveTimeoutMs = timeoutMs;
   /* ───────────────────────────────────────────── */
 
   /* Secure secrets        (Settings ▸ Secure Credentials) */
