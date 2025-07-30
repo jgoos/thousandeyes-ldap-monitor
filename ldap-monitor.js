@@ -152,10 +152,10 @@ async function runTest() {
     baseDnInfo.push('STATUS=EMPTY_BASE_DN!');
     baseDnInfo.push('expected=ou=People,o=company');
     baseDnInfo.push('issue=ldapBaseDN_not_read');
-    console.log('❌ BASE DN STATUS: FAILED - Empty base DN, credential not read');
+    console.log('BASE DN STATUS: FAILED - Empty base DN, credential not read');
   } else {
     baseDnInfo.push(`STATUS=OK`);
-    console.log(`✅ BASE DN STATUS: OK - Using ${baseDN}`);
+    console.log(`BASE DN STATUS: OK - Using ${baseDN}`);
     
     // Check compatibility
     if (bindDN && bindDN.includes(baseDN)) {
@@ -817,19 +817,22 @@ async function runTest() {
           const credentialInfo = `host=${host}|port=${port}|baseDN=${baseDN || 'NULL'}|user=${bindDN ? 'OK' : 'NULL'}`;
           const baseDnInfo = `final_baseDN='${baseDN}'|bindDN='${bindDN}'|status=${baseDN === '' ? 'EMPTY' : 'OK'}`;
           
-          const errorDetails = `🔍 LDAP Search Failed: Response type 0xbe (Invalid DN Syntax/Insufficient Access Rights)`;
-          let debugSection = `\n\n📊 CREDENTIAL DEBUG: ${credentialInfo}`;
-          debugSection += `\n📊 BASE DN DEBUG: ${baseDnInfo}`;
+          const errorDetails = `LDAP Search Failed: Response type 0xbe (Invalid DN Syntax/Insufficient Access Rights)`;
+          let debugSection = `\n\nDEBUG INFORMATION:`;
+          debugSection += `\n- Credential Status: ${credentialInfo}`;
+          debugSection += `\n- Base DN Status: ${baseDnInfo}`;
           
           let solution;
           if (baseDN === '') {
-            solution = '\n\n💡 SOLUTION: The ldapBaseDN credential was not read! Add ldapBaseDN credential with your organization\'s base DN (e.g., ou=People,o=company)';
+            solution = '\n\nSOLUTION:';
+            solution += '\nThe ldapBaseDN credential was not read successfully.';
+            solution += '\nAdd ldapBaseDN credential with your organization\'s base DN (e.g., ou=People,o=company)';
           } else {
-            solution = `\n\n💡 SOLUTIONS for base DN '${baseDN}':`;
-            solution += `\n1) Verify your user has search permissions on '${baseDN}'`;
-            solution += `\n2) Try with empty base DN (Root DSE) by removing ldapBaseDN credential`;
-            solution += `\n3) Try with exact bind DN as base DN`;
-            solution += `\n4) Verify the base DN exists and is searchable with LDAP tools`;
+            solution = `\n\nPOSSIBLE SOLUTIONS for base DN '${baseDN}':`;
+            solution += `\n1. Verify your user has search permissions on '${baseDN}'`;
+            solution += `\n2. Try with empty base DN (Root DSE) by removing ldapBaseDN credential`;
+            solution += `\n3. Try with exact bind DN as base DN`;
+            solution += `\n4. Verify the base DN exists and is searchable with LDAP tools`;
           }
           throw new Error(`${errorDetails}${debugSection}${solution}`);
         }
@@ -840,17 +843,24 @@ async function runTest() {
           const credentialInfo = `host=${host}|port=${port}|baseDN=${baseDN || 'NULL'}|user=${bindDN ? 'OK' : 'NULL'}`;
           const baseDnInfo = `final_baseDN='${baseDN}'|bindDN='${bindDN}'|status=${baseDN === '' ? 'EMPTY' : 'OK'}`;
           
-          const errorDetails = `🔍 LDAP Search Failed: Response type 0x01 (Operations Error)`;
-          let debugSection = `\n\n📊 CREDENTIAL DEBUG: ${credentialInfo}`;
-          debugSection += `\n📊 BASE DN DEBUG: ${baseDnInfo}`;
+          const errorDetails = `LDAP Search Failed: Response type 0x01 (Operations Error)`;
+          let debugSection = `\n\nDEBUG INFORMATION:`;
+          debugSection += `\n- Credential Status: ${credentialInfo}`;
+          debugSection += `\n- Base DN Status: ${baseDnInfo}`;
           
           let suggestion = '';
           if (baseDN === '') {
-            suggestion = `\n\n💡 SOLUTION: The ldapBaseDN credential was not read! Add ldapBaseDN with your organization's base DN (e.g., ou=People,o=company)`;
+            suggestion = `\n\nSOLUTION:`;
+            suggestion += `\nThe ldapBaseDN credential was not read successfully.`;
+            suggestion += `\nAdd ldapBaseDN with your organization's base DN (e.g., ou=People,o=company)`;
           } else if (baseDN.includes('ou=People')) {
-            suggestion = `\n\n💡 SOLUTION: Try your exact bind DN as base DN: 'uid=your-monitor-user,${baseDN}' OR remove ldapBaseDN for Root DSE search`;
+            suggestion = `\n\nSOLUTION:`;
+            suggestion += `\nTry your exact bind DN as base DN: 'uid=your-monitor-user,${baseDN}'`;
+            suggestion += `\nOR remove ldapBaseDN for Root DSE search`;
           } else {
-            suggestion = `\n\n💡 SOLUTION: Try your organization's base DN (e.g., ou=People,o=company) or use your exact bind DN`;
+            suggestion = `\n\nSOLUTION:`;
+            suggestion += `\nTry your organization's base DN (e.g., ou=People,o=company)`;
+            suggestion += `\nOR use your exact bind DN`;
           }
           throw new Error(`${errorDetails}${debugSection}${suggestion}`);
         } else if (responseType === 0x78) {
