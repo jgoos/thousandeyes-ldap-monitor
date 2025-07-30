@@ -51,8 +51,16 @@ const getTestConfig = () => {
     ldapHost = credentials.get('ldapHost');
     ldapPort = credentials.get('ldapPort');
     ldapBaseDN = credentials.get('ldapBaseDN');
+    
+    // Debug credential retrieval
+    console.log(`Debug - Credential values:`);
+    console.log(`  ldapHost: ${ldapHost ? `'${ldapHost}'` : 'null/undefined'}`);
+    console.log(`  ldapPort: ${ldapPort ? `'${ldapPort}'` : 'null/undefined'}`);
+    console.log(`  ldapBaseDN: ${ldapBaseDN ? `'${ldapBaseDN}'` : 'null/undefined'}`);
+    
   } catch (e) {
     // Credentials may not exist, use defaults
+    console.log(`Debug - Error retrieving credentials: ${e.message}`);
   }
 
   // Configuration with secure credentials and sensible defaults
