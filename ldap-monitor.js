@@ -523,14 +523,20 @@ async function runTest() {
       console.log(`Received bind response: ${bindRsp.length} bytes`);
       console.log(`Response hex (first 32 bytes): ${bindRsp.subarray(0, Math.min(32, bindRsp.length)).toString('hex')}`);
       
+      // Helper function for hex formatting (compatible with older JS)
+      const toHex = (num) => {
+        const hex = num.toString(16);
+        return hex.length === 1 ? '0' + hex : hex;
+      };
+      
       // Debug the response structure
       if (bindRsp.length > 0) {
         console.log(`Response byte analysis:`);
-        console.log(`  [0] = 0x${bindRsp[0].toString(16).padStart(2, '0')} (${bindRsp[0]})`);
-        if (bindRsp.length > 1) console.log(`  [1] = 0x${bindRsp[1].toString(16).padStart(2, '0')} (${bindRsp[1]})`);
-        if (bindRsp.length > 2) console.log(`  [2] = 0x${bindRsp[2].toString(16).padStart(2, '0')} (${bindRsp[2]})`);
-        if (bindRsp.length > 8) console.log(`  [8] = 0x${bindRsp[8].toString(16).padStart(2, '0')} (${bindRsp[8]}) - Response type`);
-        if (bindRsp.length > 12) console.log(`  [12] = 0x${bindRsp[12].toString(16).padStart(2, '0')} (${bindRsp[12]}) - Result code`);
+        console.log(`  [0] = 0x${toHex(bindRsp[0])} (${bindRsp[0]})`);
+        if (bindRsp.length > 1) console.log(`  [1] = 0x${toHex(bindRsp[1])} (${bindRsp[1]})`);
+        if (bindRsp.length > 2) console.log(`  [2] = 0x${toHex(bindRsp[2])} (${bindRsp[2]})`);
+        if (bindRsp.length > 8) console.log(`  [8] = 0x${toHex(bindRsp[8])} (${bindRsp[8]}) - Response type`);
+        if (bindRsp.length > 12) console.log(`  [12] = 0x${toHex(bindRsp[12])} (${bindRsp[12]}) - Result code`);
       }
 
       // Check for LDAP message structure: 0x30 (SEQUENCE) at start
@@ -573,7 +579,9 @@ async function runTest() {
       const resultCodePosition = bindResponsePosition + 4; // Result code typically 4 bytes after BindResponse
       if (bindRsp.length > resultCodePosition) {
         const resultCode = bindRsp[resultCodePosition];
-        console.log(`Result code at position ${resultCodePosition}: 0x${resultCode.toString(16).padStart(2, '0')} (${resultCode})`);
+        const resultHex = resultCode.toString(16);
+        const paddedHex = resultHex.length === 1 ? '0' + resultHex : resultHex;
+        console.log(`Result code at position ${resultCodePosition}: 0x${paddedHex} (${resultCode})`);
         
         if (resultCode !== 0x00) {
           const errorMessages = {
