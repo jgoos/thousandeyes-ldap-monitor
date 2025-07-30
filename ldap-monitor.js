@@ -507,7 +507,8 @@ async function runTest() {
       }
       
       console.log(`Sending LDAP bind request (${bindReq.length} bytes) for user: ${bindDN}`);
-      console.log(`Bind request hex (first 32 bytes): ${bindReq.subarray(0, Math.min(32, bindReq.length)).toString('hex')}`);
+      const maxReqBytes = bindReq.length < 32 ? bindReq.length : 32;
+      console.log(`Bind request hex (first 32 bytes): ${bindReq.slice(0, maxReqBytes).toString('hex')}`);
       await sock.writeAll(bindReq);
       const bindRsp = await sock.read();
       metrics.bindEnd = Date.now();
@@ -521,7 +522,8 @@ async function runTest() {
       }
 
       console.log(`Received bind response: ${bindRsp.length} bytes`);
-      console.log(`Response hex (first 32 bytes): ${bindRsp.subarray(0, Math.min(32, bindRsp.length)).toString('hex')}`);
+      const maxBytes = bindRsp.length < 32 ? bindRsp.length : 32;
+      console.log(`Response hex (first 32 bytes): ${bindRsp.slice(0, maxBytes).toString('hex')}`);
       
       // Helper function for hex formatting (compatible with older JS)
       const toHex = (num) => {
@@ -546,7 +548,8 @@ async function runTest() {
 
       // Look for BindResponse (0x61) - might be at different position depending on message structure
       let bindResponsePosition = -1;
-      for (let i = 0; i < Math.min(bindRsp.length - 1, 20); i++) {
+      const maxSearchLen = (bindRsp.length - 1) < 20 ? (bindRsp.length - 1) : 20;
+      for (let i = 0; i < maxSearchLen; i++) {
         if (bindRsp[i] === 0x61) {
           bindResponsePosition = i;
           break;
@@ -556,7 +559,8 @@ async function runTest() {
       if (bindResponsePosition === -1) {
         // Look for any response type indicators
         const responseTypes = [];
-        for (let i = 0; i < Math.min(bindRsp.length, 20); i++) {
+        const maxScanLen = bindRsp.length < 20 ? bindRsp.length : 20;
+        for (let i = 0; i < maxScanLen; i++) {
           if (bindRsp[i] >= 0x60 && bindRsp[i] <= 0x78) { // LDAP response range
             responseTypes.push(`0x${bindRsp[i].toString(16)} at position ${i}`);
           }
