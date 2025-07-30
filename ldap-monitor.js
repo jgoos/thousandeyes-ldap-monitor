@@ -2,7 +2,7 @@
  * ThousandEyes Transaction — LDAP health probe
  *
  * • Authenticated LDAPv3 simple bind
- * • Fast base-scope search against Root DSE
+ * • LDAP search with objectClass filter for maximum compatibility
  * • Fails (throws) on error or if either round-trip exceeds `slowMs`
  *
  * Secure Credentials required:
@@ -173,7 +173,7 @@ const getTestConfig = () => {
     slowMs: 300,                                            // alert threshold in ms
     baseDN: ldapBaseDN || '',                               // Override via ldapBaseDN credential ('' = Root DSE - may not work on all servers)
     fallbackSearch: !ldapBaseDN,                            // Use fallback search strategy if no base DN provided
-    filterAttr: !ldapBaseDN ? 'objectClass' : 'uid',        // use objectClass for Root DSE, uid for specific DNs
+    filterAttr: 'objectClass',                               // use objectClass for better compatibility across LDAP servers
     retryDelayMs: 100,                                      // delay between retries
     maxRetries: 2,                                          // max retry attempts
     tlsMinVersion: 'TLSv1.2',                               // minimum TLS version
@@ -758,18 +758,20 @@ async function runTest() {
     const searchScope = baseDN === '' ? 0 : 2; // Subtree scope for specific DNs like ou=People
     console.log(`Using search scope: ${searchScope} (0=base, 1=one-level, 2=subtree)`);
     console.log(`Search filter: (${filterAttr}=*) - checking for presence of ${filterAttr} attribute`);
+    console.log(`Note: Using objectClass filter for maximum LDAP server compatibility`);
     if (baseDN === '') {
-      console.log(`Note: Using objectClass filter for Root DSE search (standard approach)`);
+      console.log(`Search type: Root DSE search (base DN is empty)`);
     } else {
-      console.log(`Note: Using uid filter for organizational DN search`);
-      console.log(`HINT: If you get response type 0x82 errors, try changing filterAttr from 'uid' to 'objectClass' in the script`);
+      console.log(`Search type: Organizational DN search on '${baseDN}'`);
     }
     console.log(`Search target: base DN '${baseDN}' with ${searchScope === 0 ? 'base scope (0) - searching only the exact DN object' : 'subtree scope (2) - searching beneath the DN'}`);
     
     // For debugging: log what we expect to find
     if (baseDN.includes('ou=People') && searchScope === 2) {
-      console.log(`Info: Subtree scope search on organizational unit should find user objects beneath it.`);
-      console.log(`TROUBLESHOOTING: If this fails with 0x82, the server might not support uid filter on this DN`);
+      console.log(`Info: Subtree scope search on organizational unit should find objects beneath it.`);
+      console.log(`Using objectClass filter for broad compatibility across different LDAP implementations`);
+    } else if (baseDN === '') {
+      console.log(`Info: Root DSE search should return server information and available naming contexts`);
     }
     
     const searchReqBody = Buffer.concat([
@@ -911,13 +913,13 @@ async function runTest() {
           const errorDetails = `LDAP Search Failed: Response type 0x82 with result code 0x${foundResultCode ? toHexSearch(foundResultCode) : 'unknown'}`;
           let debugSection = `\n\nDEBUG INFORMATION:`;
           debugSection += `\n- Response type 0x82 may indicate a context-specific LDAP message encoding`;
-          debugSection += `\n- Search was: base='${baseDN}', scope=2, filter='(uid=*)'`;
+                        debugSection += `\n- Search was: base='${baseDN}', scope=2, filter='(objectClass=*)'`;
           debugSection += `\n- This suggests the search reached the server but returned an error`;
           
           let solution = `\n\nPOSSIBLE SOLUTIONS:`;
-          solution += `\n1. RECOMMENDED: Try changing the search filter in the script from 'uid' to 'objectClass'`;
-          solution += `\n2. Try using your exact bind DN as the base DN instead of '${baseDN}'`;
-          solution += `\n3. Try removing the ldapBaseDN credential to use Root DSE search`;
+          solution += `\n1. Try using your exact bind DN as the base DN instead of '${baseDN}'`;
+          solution += `\n2. Try removing the ldapBaseDN credential to use Root DSE search`;
+          solution += `\n3. Try base scope (0) instead of subtree scope (2) for more limited search`;
           solution += `\n4. Check if the user has proper search permissions on '${baseDN}'`;
           solution += `\n5. The server may use non-standard LDAP response encoding`;
           
