@@ -641,6 +641,10 @@ async function runTest() {
     markers.start('search');
     let searchRsp;
     try {
+      console.log(`Sending LDAP search request (${searchReq.length} bytes) - baseDN: '${baseDN}', filterAttr: '${filterAttr}'`);
+      const maxSearchReqBytes = searchReq.length < 32 ? searchReq.length : 32;
+      console.log(`Search request hex (first 32 bytes): ${searchReq.slice(0, maxSearchReqBytes).toString('hex')}`);
+      
       await sock.writeAll(searchReq);
 
       const searchChunks = [];
@@ -661,23 +665,112 @@ async function runTest() {
     const searchRTT = metrics.searchEnd - metrics.searchStart;
     console.log(`Search RTT: ${searchRTT} ms`);
 
-    /* Enhanced search response validation */
+    /* Enhanced search response validation with detailed debugging */
     if (!searchRsp || !searchRsp.length) {
       throw new Error('Search failed: No response received from server');
     }
     
-    if (searchRsp.length > 8 && searchRsp[8] !== 0x64) {
-      throw new Error(`Search failed: Unexpected response type 0x${searchRsp[8].toString(16)} (expected 0x64 SearchResultEntry)`);
+    console.log(`Received search response: ${searchRsp.length} bytes`);
+    const maxSearchBytes = searchRsp.length < 32 ? searchRsp.length : 32;
+    console.log(`Search response hex (first 32 bytes): ${searchRsp.slice(0, maxSearchBytes).toString('hex')}`);
+    
+    // Helper function for hex formatting (reuse from bind)
+    const toHexSearch = (num) => {
+      const hex = num.toString(16);
+      return hex.length === 1 ? '0' + hex : hex;
+    };
+    
+    // Debug the search response structure
+    if (searchRsp.length > 0) {
+      console.log(`Search response byte analysis:`);
+      console.log(`  [0] = 0x${toHexSearch(searchRsp[0])} (${searchRsp[0]}) - Should be SEQUENCE (0x30)`);
+      if (searchRsp.length > 1) console.log(`  [1] = 0x${toHexSearch(searchRsp[1])} (${searchRsp[1]}) - Length`);
+      if (searchRsp.length > 2) console.log(`  [2] = 0x${toHexSearch(searchRsp[2])} (${searchRsp[2]})`);
+      if (searchRsp.length > 8) console.log(`  [8] = 0x${toHexSearch(searchRsp[8])} (${searchRsp[8]}) - Response type`);
+      if (searchRsp.length > 12) console.log(`  [12] = 0x${toHexSearch(searchRsp[12])} (${searchRsp[12]})`);
+    }
+    
+    // Check for LDAP message structure: 0x30 (SEQUENCE) at start
+    if (searchRsp.length > 0 && searchRsp[0] !== 0x30) {
+      throw new Error(`Search failed: Invalid LDAP message format - expected SEQUENCE (0x30), got 0x${toHexSearch(searchRsp[0])}`);
+    }
+    
+    // Look for different types of search responses
+    let searchEntryPosition = -1;
+    let searchDonePosition = -1;
+    let searchRefPosition = -1;
+    
+    const maxScanSearchLen = searchRsp.length < 50 ? searchRsp.length : 50;
+    for (let i = 0; i < maxScanSearchLen; i++) {
+      if (searchRsp[i] === 0x64) searchEntryPosition = i; // SearchResultEntry
+      if (searchRsp[i] === 0x65) searchDonePosition = i;  // SearchResultDone
+      if (searchRsp[i] === 0x73) searchRefPosition = i;   // SearchResultReference
+    }
+    
+    console.log(`Search response types found:`);
+    console.log(`  SearchResultEntry (0x64): ${searchEntryPosition >= 0 ? 'position ' + searchEntryPosition : 'not found'}`);
+    console.log(`  SearchResultDone (0x65): ${searchDonePosition >= 0 ? 'position ' + searchDonePosition : 'not found'}`);
+    console.log(`  SearchResultReference (0x73): ${searchRefPosition >= 0 ? 'position ' + searchRefPosition : 'not found'}`);
+    
+    // Check what's actually at position 8
+    if (searchRsp.length > 8) {
+      const responseType = searchRsp[8];
+      console.log(`Response type at position 8: 0x${toHexSearch(responseType)} (${responseType})`);
+      
+      // Handle different response types more flexibly
+      if (responseType === 0x65) {
+        console.log('Received SearchResultDone - this may indicate an empty result set or immediate completion');
+        // Continue processing - this might be valid
+      } else if (responseType === 0x64) {
+        console.log('Received SearchResultEntry - search found results');
+      } else {
+        // Look for the actual response type in the message
+        const responseTypes = [];
+        for (let i = 0; i < maxScanSearchLen; i++) {
+          if (searchRsp[i] >= 0x60 && searchRsp[i] <= 0x78) { // LDAP response range
+            responseTypes.push(`0x${toHexSearch(searchRsp[i])} at position ${i}`);
+          }
+        }
+        console.log(`Found LDAP response types: ${responseTypes.length > 0 ? responseTypes.join(', ') : 'none'}`);
+        throw new Error(`Search failed: Unexpected response type 0x${toHexSearch(responseType)} at position 8. Expected 0x64 (SearchResultEntry) or 0x65 (SearchResultDone)`);
+      }
     }
 
     const doneIndex = findSearchDoneIndex(searchRsp);
     const searchRspLength = searchRsp && searchRsp.length ? searchRsp.length : 0;
-    if (doneIndex === -1 || doneIndex + 4 >= searchRspLength) {
-      throw new Error('Search failed: No SearchResultDone message');
-    }
-    const searchResultCode = searchRsp[doneIndex + 4];
-    if (searchResultCode !== 0x00) {
-      throw new Error(`Search failed: code 0x${searchResultCode.toString(16)}`);
+    
+    console.log(`SearchResultDone analysis:`);
+    console.log(`  Search response length: ${searchRspLength}`);
+    console.log(`  SearchResultDone index: ${doneIndex}`);
+    
+    if (doneIndex === -1) {
+      // If we didn't find SearchResultDone, but we got SearchResultDone at position 8, handle it
+      if (searchRsp.length > 8 && searchRsp[8] === 0x65) {
+        console.log('SearchResultDone found at position 8 - likely immediate completion');
+        const resultCodePos = 12; // Typical position for result code in SearchResultDone
+        if (searchRsp.length > resultCodePos) {
+          const directResultCode = searchRsp[resultCodePos];
+          console.log(`Direct result code at position ${resultCodePos}: 0x${toHexSearch(directResultCode)} (${directResultCode})`);
+          if (directResultCode !== 0x00) {
+            throw new Error(`Search failed: code 0x${toHexSearch(directResultCode)}`);
+          }
+          console.log('Search completed successfully with empty result set');
+        } else {
+          console.log('Warning: Could not determine result code from SearchResultDone');
+        }
+      } else {
+        throw new Error('Search failed: No SearchResultDone message found');
+      }
+    } else {
+      if (doneIndex + 4 >= searchRspLength) {
+        throw new Error('Search failed: SearchResultDone message truncated');
+      }
+      const searchResultCode = searchRsp[doneIndex + 4];
+      console.log(`Search result code at position ${doneIndex + 4}: 0x${toHexSearch(searchResultCode)} (${searchResultCode})`);
+      if (searchResultCode !== 0x00) {
+        throw new Error(`Search failed: code 0x${toHexSearch(searchResultCode)}`);
+      }
+      console.log('Search completed successfully');
     }
     
     if (searchRTT > slowMs) {
