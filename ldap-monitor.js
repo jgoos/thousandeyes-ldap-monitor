@@ -8,7 +8,7 @@
  * Secure Credentials required:
  *   ldapMonUser  →  full bind DN   (e.g. "cn=monitor,ou=svc,dc=example,dc=com")
  *   ldapMonPass  →  password
- *   ldapCaPem    →  CA certificate in PEM format for LDAPS connections
+ *   ldapCaBase64 →  CA certificate(s) in base64-encoded format for LDAPS connections
  *
  * Optional Configuration Credentials (override defaults):
  *   ldapHost     →  LDAP server hostname
@@ -97,13 +97,13 @@ async function runTest() {
   /* Secure secrets        (Settings ▸ Secure Credentials) */
   const bindDN  = credentials.get('ldapMonUser');
   const bindPwd = credentials.get('ldapMonPass');
-  const caPem   = credentials.get('ldapCaPem');
+  const caBase64 = credentials.get('ldapCaBase64');
   
   // Debug certificate information
   if (port === 636) {
-    if (caPem) {
-      console.log(`CA certificate provided - length: ${caPem.length} characters`);
-      console.log(`CA certificate starts with: ${caPem.substring(0, 27)}...`);
+    if (caBase64) {
+      console.log(`Base64-encoded CA certificate provided - length: ${caBase64.length} characters`);
+      console.log(`Base64 data starts with: ${caBase64.substring(0, 40)}...`);
     } else {
       console.log('No CA certificate provided - will use system certificates');
     }
@@ -352,7 +352,7 @@ async function runTest() {
       connectMarkerStarted = true;
       
       if (port === 636) {
-        console.log(`Establishing LDAPS connection with ${caPem ? 'custom CA certificate' : 'system CA certificates'}`);
+        console.log(`Establishing LDAPS connection with ${caBase64 ? 'custom CA certificate' : 'system CA certificates'}`);
       }
       
       let connectPromise;
@@ -364,17 +364,42 @@ async function runTest() {
         };
         
         // Add CA certificate if provided
-        if (caPem) {
+        if (caBase64) {
           try {
-            // Ensure the CA certificate is properly formatted
-            const caCert = caPem.trim();
-            if (!caCert.includes('-----BEGIN CERTIFICATE-----')) {
-              throw new Error('CA certificate must be in PEM format (missing -----BEGIN CERTIFICATE-----)');
+            // Decode base64 to PEM format
+            console.log('Decoding base64 CA certificate...');
+            const pemCertificate = Buffer.from(caBase64.trim(), 'base64').toString('utf8');
+            console.log(`Decoded certificate length: ${pemCertificate.length} characters`);
+            
+            // Normalize line endings and validate PEM format
+            const normalizedPem = pemCertificate.replace(/\r\n/g, '\n').trim();
+            
+            if (!normalizedPem.includes('-----BEGIN CERTIFICATE-----')) {
+              throw new Error('Decoded certificate is not in valid PEM format (missing -----BEGIN CERTIFICATE-----)');
             }
-            tlsOptions.ca = [Buffer.from(caCert, 'utf8')];
-            console.log('Using custom CA certificate for LDAPS connection');
+            
+            // Extract all certificates from the PEM data (handles certificate chains)
+            const certRegex = /-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICATE-----/g;
+            const certificates = normalizedPem.match(certRegex);
+            
+            if (!certificates || certificates.length === 0) {
+              throw new Error('No valid certificates found in decoded PEM data');
+            }
+            
+            console.log(`Found ${certificates.length} certificate(s) in decoded data`);
+            
+            // Convert each certificate to Buffer
+            const caBuffers = certificates.map((cert, index) => {
+              const trimmedCert = cert.trim();
+              console.log(`Certificate ${index + 1}: ${trimmedCert.length} chars`);
+              return Buffer.from(trimmedCert, 'utf8');
+            });
+            
+            tlsOptions.ca = caBuffers;
+            console.log(`Using ${caBuffers.length} custom CA certificate(s) for LDAPS connection`);
+            
           } catch (caError) {
-            throw new Error(`Invalid CA certificate format: ${caError.message}`);
+            throw new Error(`CA certificate processing failed: ${caError.message}`);
           }
         } else {
           console.log('Warning: Using system CA certificates - may fail with self-signed certificates');
@@ -418,8 +443,8 @@ async function runTest() {
       const errorMsg = err && err.message || 'Unknown error';
       if (errorMsg.includes('certificate') || errorMsg.includes('CERT_') || errorMsg.includes('SSL') || errorMsg.includes('TLS')) {
         console.log(`Certificate/TLS error on attempt ${attempt + 1}: ${errorMsg}`);
-        if (!caPem && port === 636) {
-          console.log('Hint: Consider providing ldapCaPem credential for self-signed certificates');
+        if (!caBase64 && port === 636) {
+          console.log('Hint: Consider providing ldapCaBase64 credential for self-signed certificates');
         }
       } else {
         console.log(`Connection attempt ${attempt + 1} failed: ${errorMsg}`);
@@ -429,7 +454,7 @@ async function runTest() {
       if (attempt > maxRetries) {
         // Provide more specific error message for certificate issues
         if (errorMsg.includes('certificate') || errorMsg.includes('CERT_') || errorMsg.includes('SSL') || errorMsg.includes('TLS')) {
-          throw new Error(`TLS/Certificate validation failed after ${maxRetries + 1} attempts: ${errorMsg}. ${!caPem && port === 636 ? 'Consider providing ldapCaPem credential for self-signed certificates.' : ''}`);
+          throw new Error(`TLS/Certificate validation failed after ${maxRetries + 1} attempts: ${errorMsg}. ${!caBase64 && port === 636 ? 'Consider providing ldapCaBase64 credential (base64-encoded) for self-signed certificates.' : ''}`);
         }
         throw new Error(`Connection failed after ${maxRetries + 1} attempts: ${errorMsg}`);
       }
