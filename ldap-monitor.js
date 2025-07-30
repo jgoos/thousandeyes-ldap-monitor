@@ -637,6 +637,7 @@ async function runTest() {
     // Use subtree scope (2) for more flexibility, base scope (0) for exact match
     const searchScope = baseDN === '' ? 0 : 2; // Base scope for Root DSE, subtree for specific DN
     console.log(`Using search scope: ${searchScope} (0=base, 1=one-level, 2=subtree)`);
+    console.log(`Search filter: (${filterAttr}=*) - checking for presence of ${filterAttr} attribute`);
     
     const searchReqBody = Buffer.concat([
       str(baseDN),         // baseObject
@@ -760,9 +761,16 @@ async function runTest() {
         // If this is a fallback search and we get 0xbe, provide specific guidance
         if (responseType === 0xbe) {
           const errorDetails = `Search failed: Response type 0xbe typically indicates "Invalid DN Syntax" or "Insufficient Access Rights".`;
-          const solution = baseDN === '' ? 
-            ' Solution: Add ldapBaseDN credential with your LDAP server\'s base DN (e.g., dc=company,dc=com, ou=users,dc=example,dc=org).' :
-            ' Check if the provided base DN is correct for your LDAP server.';
+          let solution;
+          if (baseDN === '') {
+            solution = ' Solution: Add ldapBaseDN credential with your LDAP server\'s base DN (e.g., dc=company,dc=com, ou=users,dc=example,dc=org).';
+          } else {
+            solution = ` Current base DN: '${baseDN}'. Possible solutions:`;
+            solution += ` 1) Try a more specific base DN like 'ou=People,${baseDN}'`;
+            solution += ` 2) Check if your user has search permissions on '${baseDN}'`;
+            solution += ` 3) Try with an empty base DN (Root DSE) by removing ldapBaseDN credential`;
+            solution += ` 4) Verify the base DN exists by checking with LDAP browser tools`;
+          }
           throw new Error(`${errorDetails}${solution}`);
         }
         
