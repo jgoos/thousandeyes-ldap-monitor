@@ -63,7 +63,7 @@ const getTestConfig = () => {
     slowMs: 300,                                            // alert threshold in ms
     baseDN: ldapBaseDN || '',                               // Override via ldapBaseDN credential ('' = Root DSE - may not work on all servers)
     fallbackSearch: !ldapBaseDN,                            // Use fallback search strategy if no base DN provided
-    filterAttr: 'uid',                                      // attribute for present filter (try uid instead of objectClass)
+    filterAttr: baseDN === '' ? 'objectClass' : 'uid',       // use objectClass for Root DSE, uid for specific DNs
     retryDelayMs: 100,                                      // delay between retries
     maxRetries: 2,                                          // max retry attempts
     tlsMinVersion: 'TLSv1.2',                               // minimum TLS version
@@ -639,7 +639,11 @@ async function runTest() {
     const searchScope = baseDN === '' ? 0 : 2; // Subtree scope for specific DNs like ou=People
     console.log(`Using search scope: ${searchScope} (0=base, 1=one-level, 2=subtree)`);
     console.log(`Search filter: (${filterAttr}=*) - checking for presence of ${filterAttr} attribute`);
-    console.log(`Note: Using uid filter instead of objectClass to avoid potential access restrictions`);
+    if (baseDN === '') {
+      console.log(`Note: Using objectClass filter for Root DSE search (standard approach)`);
+    } else {
+      console.log(`Note: Using uid filter for organizational DN search`);
+    }
     console.log(`Search target: base DN '${baseDN}' with ${searchScope === 0 ? 'base scope (0) - searching only the exact DN object' : 'subtree scope (2) - searching beneath the DN'}`);
     
     // For debugging: log what we expect to find
@@ -786,12 +790,14 @@ async function runTest() {
         // Handle specific response types with detailed explanations
         if (responseType === 0x01) {
           let suggestion = '';
-          if (baseDN.includes('ou=People')) {
-            suggestion = ` Try using your exact bind DN instead: 'uid=sa-iam-monitor,${baseDN}' or remove the ldapBaseDN credential to use Root DSE.`;
+          if (baseDN === '') {
+            suggestion = ` Root DSE search failed. Try adding back ldapBaseDN credential with 'ou=People,o=asml' (which works in Apache Directory Studio).`;
+          } else if (baseDN.includes('ou=People')) {
+            suggestion = ` The organizational DN search failed. This exact configuration works in Apache Directory Studio, so there may be a subtle protocol difference. Try your exact bind DN: 'uid=sa-iam-monitor,${baseDN}'.`;
           } else {
-            suggestion = ` Consider using your exact bind DN or a different base DN structure.`;
+            suggestion = ` Consider using your exact bind DN or try 'ou=People,o=asml' which works in Apache Directory Studio.`;
           }
-          throw new Error(`Search failed: Response type 0x01 indicates an LDAP Operations Error. The search operation on '${baseDN}' failed.${suggestion}`);
+          throw new Error(`Search failed: Response type 0x01 indicates an LDAP Operations Error. The search operation on '${baseDN || 'Root DSE'}' failed.${suggestion}`);
         } else if (responseType === 0x78) {
           throw new Error(`Search failed: Response type 0x78 indicates an Extended Response. This may be an unsupported operation or protocol mismatch.`);
         } else {
