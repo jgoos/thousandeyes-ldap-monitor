@@ -506,6 +506,8 @@ async function runTest() {
         throw new Error('Socket does not have required writeAll/read methods');
       }
       
+      console.log(`Sending LDAP bind request (${bindReq.length} bytes) for user: ${bindDN}`);
+      console.log(`Bind request hex (first 32 bytes): ${bindReq.subarray(0, Math.min(32, bindReq.length)).toString('hex')}`);
       await sock.writeAll(bindReq);
       const bindRsp = await sock.read();
       metrics.bindEnd = Date.now();
@@ -513,32 +515,88 @@ async function runTest() {
       bindRTT = metrics.bindEnd - metrics.bindStart;
       console.log(`Bind RTT: ${bindRTT} ms`);
 
-      /* Enhanced bind response validation */
+      /* Enhanced bind response validation with detailed debugging */
       if (!bindRsp || !bindRsp.length) {
         throw new Error('Bind failed: No response received from server');
       }
 
-      if (bindRsp.length > 8 && bindRsp[8] !== 0x61) {
-        throw new Error(`Bind failed: Unexpected response type 0x${bindRsp[8].toString(16)} (expected 0x61)`);
+      console.log(`Received bind response: ${bindRsp.length} bytes`);
+      console.log(`Response hex (first 32 bytes): ${bindRsp.subarray(0, Math.min(32, bindRsp.length)).toString('hex')}`);
+      
+      // Debug the response structure
+      if (bindRsp.length > 0) {
+        console.log(`Response byte analysis:`);
+        console.log(`  [0] = 0x${bindRsp[0].toString(16).padStart(2, '0')} (${bindRsp[0]})`);
+        if (bindRsp.length > 1) console.log(`  [1] = 0x${bindRsp[1].toString(16).padStart(2, '0')} (${bindRsp[1]})`);
+        if (bindRsp.length > 2) console.log(`  [2] = 0x${bindRsp[2].toString(16).padStart(2, '0')} (${bindRsp[2]})`);
+        if (bindRsp.length > 8) console.log(`  [8] = 0x${bindRsp[8].toString(16).padStart(2, '0')} (${bindRsp[8]}) - Response type`);
+        if (bindRsp.length > 12) console.log(`  [12] = 0x${bindRsp[12].toString(16).padStart(2, '0')} (${bindRsp[12]}) - Result code`);
       }
 
-      // Check result code (should be at position 12 for success = 0)
-      if (bindRsp.length > 12 && bindRsp[12] !== 0x00) {
-        const resultCode = bindRsp[12];
-        const errorMessages = {
-          0x01: 'operationsError',
-          0x07: 'authMethodNotSupported',
-          0x08: 'strongerAuthRequired',
-          0x31: 'invalidCredentials',
-          0x32: 'insufficientAccessRights'
-        };
-        const errorMsg = errorMessages[resultCode] || `code 0x${resultCode.toString(16)}`;
-        throw new Error(`Bind failed: ${errorMsg}`);
+      // Check for LDAP message structure: 0x30 (SEQUENCE) at start
+      if (bindRsp.length > 0 && bindRsp[0] !== 0x30) {
+        throw new Error(`Bind failed: Invalid LDAP message format - expected SEQUENCE (0x30), got 0x${bindRsp[0].toString(16)}`);
+      }
+
+      // Look for BindResponse (0x61) - might be at different position depending on message structure
+      let bindResponsePosition = -1;
+      for (let i = 0; i < Math.min(bindRsp.length - 1, 20); i++) {
+        if (bindRsp[i] === 0x61) {
+          bindResponsePosition = i;
+          break;
+        }
+      }
+      
+      if (bindResponsePosition === -1) {
+        // Look for any response type indicators
+        const responseTypes = [];
+        for (let i = 0; i < Math.min(bindRsp.length, 20); i++) {
+          if (bindRsp[i] >= 0x60 && bindRsp[i] <= 0x78) { // LDAP response range
+            responseTypes.push(`0x${bindRsp[i].toString(16)} at position ${i}`);
+          }
+        }
+        throw new Error(`Bind failed: No BindResponse (0x61) found in response. Found response types: ${responseTypes.length > 0 ? responseTypes.join(', ') : 'none'}`);
+      }
+      
+      console.log(`Found BindResponse (0x61) at position ${bindResponsePosition}`);
+      
+      // Check for the traditional position first (position 8)
+      if (bindRsp.length > 8 && bindRsp[8] !== 0x61) {
+        if (bindResponsePosition !== 8) {
+          console.log(`Warning: BindResponse found at position ${bindResponsePosition}, not the expected position 8`);
+        } else {
+          throw new Error(`Bind failed: Unexpected response type 0x${bindRsp[8].toString(16)} (expected 0x61)`);
+        }
+      }
+
+      // Check result code - adjust position based on where BindResponse was found
+      const resultCodePosition = bindResponsePosition + 4; // Result code typically 4 bytes after BindResponse
+      if (bindRsp.length > resultCodePosition) {
+        const resultCode = bindRsp[resultCodePosition];
+        console.log(`Result code at position ${resultCodePosition}: 0x${resultCode.toString(16).padStart(2, '0')} (${resultCode})`);
+        
+        if (resultCode !== 0x00) {
+          const errorMessages = {
+            0x01: 'operationsError',
+            0x07: 'authMethodNotSupported', 
+            0x08: 'strongerAuthRequired',
+            0x31: 'invalidCredentials',
+            0x32: 'insufficientAccessRights'
+          };
+          const errorMsg = errorMessages[resultCode] || `code 0x${resultCode.toString(16)}`;
+          throw new Error(`Bind failed: ${errorMsg}`);
+        }
+        
+        console.log('Bind successful - result code 0x00');
+      } else {
+        console.log('Warning: Could not determine result code from response');
       }
 
       if (bindRTT > slowMs) {
         throw new Error(`Slow bind: ${bindRTT} ms (>${slowMs}ms threshold)`);
       }
+      
+      console.log('LDAP bind completed successfully');
     } finally {
       markers.stop('bind');
     }
