@@ -52,32 +52,96 @@ const getTestConfig = () => {
   debugInfo.push(`get=${typeof credentials.get}`);
   
   try {
-    // Test each credential individually
-    ldapHost = credentials.get('ldapHost');
-    const hostStatus = ldapHost ? `'${ldapHost}'` : 'NULL';
-    debugInfo.push(`host=${hostStatus}`);
+    // Test each credential individually with detailed analysis
+    console.log('Testing ldapHost credential...');
+    try {
+      ldapHost = credentials.get('ldapHost');
+      console.log(`ldapHost raw result:`, ldapHost);
+      console.log(`ldapHost type: ${typeof ldapHost}`);
+      console.log(`ldapHost length: ${ldapHost ? ldapHost.length : 'N/A'}`);
+      const hostStatus = ldapHost ? `'${ldapHost}'` : 'NULL';
+      debugInfo.push(`host=${hostStatus}`);
+    } catch (hostErr) {
+      console.log(`ldapHost error: ${hostErr.message}`);
+      debugInfo.push(`host=ERROR:${hostErr.message}`);
+    }
     
-    ldapPort = credentials.get('ldapPort');
-    const portStatus = ldapPort ? `'${ldapPort}'` : 'NULL';
-    debugInfo.push(`port=${portStatus}`);
+    console.log('Testing ldapPort credential...');
+    try {
+      ldapPort = credentials.get('ldapPort');
+      console.log(`ldapPort raw result:`, ldapPort);
+      console.log(`ldapPort type: ${typeof ldapPort}`);
+      console.log(`ldapPort length: ${ldapPort ? ldapPort.length : 'N/A'}`);
+      const portStatus = ldapPort ? `'${ldapPort}'` : 'NULL';
+      debugInfo.push(`port=${portStatus}`);
+    } catch (portErr) {
+      console.log(`ldapPort error: ${portErr.message}`);
+      debugInfo.push(`port=ERROR:${portErr.message}`);
+    }
     
-    ldapBaseDN = credentials.get('ldapBaseDN');
-    const baseDnStatus = ldapBaseDN ? `'${ldapBaseDN}'` : 'NULL';
-    debugInfo.push(`baseDN=${baseDnStatus}`);
+    console.log('Testing ldapBaseDN credential...');
+    try {
+      ldapBaseDN = credentials.get('ldapBaseDN');
+      console.log(`ldapBaseDN raw result:`, ldapBaseDN);
+      console.log(`ldapBaseDN type: ${typeof ldapBaseDN}`);
+      console.log(`ldapBaseDN length: ${ldapBaseDN ? ldapBaseDN.length : 'N/A'}`);
+      console.log(`ldapBaseDN === null: ${ldapBaseDN === null}`);
+      console.log(`ldapBaseDN === undefined: ${ldapBaseDN === undefined}`);
+      console.log(`ldapBaseDN === '': ${ldapBaseDN === ''}`);
+      
+      // Check for whitespace-only values
+      if (ldapBaseDN && typeof ldapBaseDN === 'string') {
+        console.log(`ldapBaseDN trimmed: '${ldapBaseDN.trim()}'`);
+        console.log(`ldapBaseDN trimmed length: ${ldapBaseDN.trim().length}`);
+      }
+      
+      const baseDnStatus = ldapBaseDN ? `'${ldapBaseDN}'` : 'NULL';
+      debugInfo.push(`baseDN=${baseDnStatus}`);
+    } catch (baseDnErr) {
+      console.log(`ldapBaseDN error: ${baseDnErr.message}`);
+      debugInfo.push(`baseDN=ERROR:${baseDnErr.message}`);
+    }
     
     // Test auth credentials for comparison
+    console.log('Testing auth credentials for comparison...');
     try {
       const testUser = credentials.get('ldapMonUser');
       const testPass = credentials.get('ldapMonPass');
+      console.log(`ldapMonUser type: ${typeof testUser}`);
+      console.log(`ldapMonPass type: ${typeof testPass}`);
       debugInfo.push(`user=${testUser ? 'OK' : 'NULL'}`);
       debugInfo.push(`pass=${testPass ? 'OK' : 'NULL'}`);
     } catch (authErr) {
+      console.log(`Auth credential error: ${authErr.message}`);
       debugInfo.push(`auth_err=${authErr.message}`);
+    }
+    
+    // Try alternative credential access methods if standard approach fails
+    if (!ldapBaseDN) {
+      console.log('Trying alternative credential access methods...');
+      
+      // Try with different casing
+      const alternatives = ['ldapbasedn', 'LdapBaseDN', 'LDAPBASEDN', 'ldap_base_dn', 'LDAP_BASE_DN'];
+      for (const altName of alternatives) {
+        try {
+          console.log(`Trying credential name: ${altName}`);
+          const altResult = credentials.get(altName);
+          if (altResult) {
+            console.log(`SUCCESS with ${altName}: '${altResult}'`);
+            ldapBaseDN = altResult;
+            debugInfo.push(`baseDN_alt=${altName}:'${altResult}'`);
+            break;
+          }
+        } catch (altErr) {
+          console.log(`${altName} failed: ${altErr.message}`);
+        }
+      }
     }
     
   } catch (e) {
     debugInfo.push(`ERROR=${e.message}`);
     console.log(`CREDENTIAL ERROR: ${e.message}`);
+    console.log(`Error stack: ${e.stack}`);
   }
   
   // Log for console visibility
@@ -87,6 +151,20 @@ const getTestConfig = () => {
   
   // Debug info is available in console logs and will be reconstructed in error messages
 
+  // Handle whitespace-only values
+  if (ldapBaseDN && typeof ldapBaseDN === 'string') {
+    ldapBaseDN = ldapBaseDN.trim();
+    if (ldapBaseDN === '') {
+      console.log('ldapBaseDN contained only whitespace, treating as null');
+      ldapBaseDN = null;
+    }
+  }
+  
+  console.log(`Final credential values before config creation:`);
+  console.log(`- ldapHost: ${ldapHost ? `'${ldapHost}'` : 'null'}`);
+  console.log(`- ldapPort: ${ldapPort ? `'${ldapPort}'` : 'null'}`);
+  console.log(`- ldapBaseDN: ${ldapBaseDN ? `'${ldapBaseDN}'` : 'null'}`);
+  
   // Configuration with secure credentials and sensible defaults
   return {
     host: ldapHost || 'ldap.example.com',                   // Override via ldapHost credential
