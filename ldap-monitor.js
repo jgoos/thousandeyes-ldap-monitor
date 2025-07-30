@@ -63,7 +63,7 @@ const getTestConfig = () => {
     slowMs: 300,                                            // alert threshold in ms
     baseDN: ldapBaseDN || '',                               // Override via ldapBaseDN credential ('' = Root DSE - may not work on all servers)
     fallbackSearch: !ldapBaseDN,                            // Use fallback search strategy if no base DN provided
-    filterAttr: 'objectClass',                              // attribute for present filter
+    filterAttr: 'uid',                                      // attribute for present filter (try uid instead of objectClass)
     retryDelayMs: 100,                                      // delay between retries
     maxRetries: 2,                                          // max retry attempts
     tlsMinVersion: 'TLSv1.2',                               // minimum TLS version
@@ -634,10 +634,12 @@ async function runTest() {
     
 
     /* 3 ▸ flexible search  (messageID = 2) */
-    // Use subtree scope (2) for more flexibility, base scope (0) for exact match
-    const searchScope = baseDN === '' ? 0 : 2; // Base scope for Root DSE, subtree for specific DN
+    // Use base scope (0) for specific DN, subtree scope (2) for organizational searches
+    // Base scope searches the exact DN object, subtree searches beneath it
+    const searchScope = baseDN === '' ? 0 : 0; // Use base scope - searches only the exact DN object
     console.log(`Using search scope: ${searchScope} (0=base, 1=one-level, 2=subtree)`);
     console.log(`Search filter: (${filterAttr}=*) - checking for presence of ${filterAttr} attribute`);
+    console.log(`Note: Using uid filter instead of objectClass to avoid potential access restrictions`);
     
     const searchReqBody = Buffer.concat([
       str(baseDN),         // baseObject
@@ -766,10 +768,11 @@ async function runTest() {
             solution = ' Solution: Add ldapBaseDN credential with your LDAP server\'s base DN (e.g., dc=company,dc=com, ou=users,dc=example,dc=org).';
           } else {
             solution = ` Current base DN: '${baseDN}'. Possible solutions:`;
-            solution += ` 1) Try a more specific base DN like 'ou=People,${baseDN}'`;
+            solution += ` 1) The search filter has been changed from objectClass to uid to avoid restrictions`;
             solution += ` 2) Check if your user has search permissions on '${baseDN}'`;
             solution += ` 3) Try with an empty base DN (Root DSE) by removing ldapBaseDN credential`;
-            solution += ` 4) Verify the base DN exists by checking with LDAP browser tools`;
+            solution += ` 4) Consider using base scope (0) instead of subtree scope for more limited search`;
+            solution += ` 5) Verify the base DN exists and is searchable with LDAP browser tools`;
           }
           throw new Error(`${errorDetails}${solution}`);
         }
