@@ -348,8 +348,36 @@ async function runTest() {
     const errorInfo = LDAP_RESULT_CODES[resultCode];
     if (errorInfo) {
       return `${errorInfo.name} (${resultCode}/0x${resultCode.toString(16)}): ${errorInfo.description}`;
+    } else {
+      // Enhanced debugging for unknown result codes
+      const hex = resultCode.toString(16);
+      const ascii = (resultCode >= 32 && resultCode <= 126) ? String.fromCharCode(resultCode) : 'non-printable';
+      const isAscii = resultCode >= 32 && resultCode <= 126;
+      
+      let debugMsg = `Unknown LDAP result code ${resultCode} (0x${hex})`;
+      
+      if (isAscii) {
+        debugMsg += `\n\nDEBUG ANALYSIS:\n`;
+        debugMsg += `- This byte (0x${hex}) represents ASCII character '${ascii}'\n`;
+        debugMsg += `- This suggests we may be reading text data instead of LDAP protocol bytes\n`;
+        debugMsg += `- The SearchResultDone detection or BER length parsing may have errors\n`;
+        debugMsg += `- Check the hex dump above to verify the actual LDAP message structure\n`;
+        debugMsg += `\nPOSSIBLE CAUSES:\n`;
+        debugMsg += `1. False positive SearchResultDone detection (reading ASCII 'e' as 0x65)\n`;
+        debugMsg += `2. Incorrect BER length parsing leading to wrong result code position\n`;
+        debugMsg += `3. Server response contains mixed LDAP protocol and text data\n`;
+        debugMsg += `4. Response truncation or corruption during transmission\n`;
+        debugMsg += `\nSOLUTIONS:\n`;
+        debugMsg += `1. Review the hex dump for proper LDAP message structure\n`;
+        debugMsg += `2. Verify BER length calculation matches actual message format\n`;
+        debugMsg += `3. Check if server uses non-standard LDAP response encoding\n`;
+        debugMsg += `4. Try base scope (0) instead of subtree scope (2) for simpler responses`;
+      } else {
+        debugMsg += `\n\nThis is not a standard LDAP result code (valid range: 0-80/0x00-0x50)`;
+      }
+      
+      return debugMsg;
     }
-    return `Unknown LDAP result code ${resultCode} (0x${resultCode.toString(16)})`;
   };
   /* ---------------------------------------------------------------- */
 
@@ -584,6 +612,21 @@ async function runTest() {
           console.log(`Found valid SearchResultDone (0x65) at position ${i} with proper LDAP context`);
           console.log(`  BER length: ${lengthInfo.length} bytes (${lengthInfo.bytesUsed} octets used)`);
           console.log(`  Result code position: ${resultCodePos}`);
+          
+          // Show context around this SearchResultDone for verification
+          const contextStart = Math.max(0, i - 10);
+          const contextEnd = Math.min(response.length, resultCodePos + 5);
+          console.log(`  Context hex dump (positions ${contextStart}-${contextEnd-1}):`);
+          for (let j = contextStart; j < contextEnd; j++) {
+            const byte = response[j];
+            const ascii = (byte >= 32 && byte <= 126) ? String.fromCharCode(byte) : '.';
+            let marker = '';
+            if (j === i) marker = ' <-- SearchResultDone';
+            else if (j === i + 1) marker = ' <-- BER length';
+            else if (j === resultCodePos) marker = ' <-- Result code';
+            console.log(`    [${j}] = 0x${toHexSearch(byte)} (${byte}) '${ascii}'${marker}`);
+          }
+          
           return i; // This looks like a real LDAP SearchResultDone
         }
       }
@@ -1363,6 +1406,36 @@ async function runTest() {
       const searchResultCode = searchRsp[resultCodePos];
       console.log(`Search result code at position ${resultCodePos}: 0x${toHexSearch(searchResultCode)} (${searchResultCode})`);
       console.log(`  SearchResultDone structure: tag=0x65 at ${doneIndex}, length=${resultLengthInfo.length} (${resultLengthInfo.bytesUsed} bytes), result=0x${toHexSearch(searchResultCode)}`);
+      
+      // Enhanced debugging for result code validation
+      console.log(`ENHANCED RESULT CODE DEBUG:`);
+      console.log(`  doneIndex: ${doneIndex}`);
+      console.log(`  BER length value: ${resultLengthInfo.length}`);
+      console.log(`  BER length bytes used: ${resultLengthInfo.bytesUsed}`);
+      console.log(`  Calculated result code position: ${resultCodePos}`);
+      console.log(`  Response length: ${searchRspLength}`);
+      
+      // Show detailed hex dump around result code position
+      const debugStart = Math.max(0, doneIndex - 5);
+      const debugEnd = Math.min(searchRspLength, resultCodePos + 10);
+      console.log(`  Hex dump (positions ${debugStart}-${debugEnd-1}):`);
+      for (let i = debugStart; i < debugEnd; i++) {
+        const byte = searchRsp[i];
+        const ascii = (byte >= 32 && byte <= 126) ? String.fromCharCode(byte) : '.';
+        let marker = '';
+        if (i === doneIndex) marker = ' <-- SearchResultDone tag';
+        else if (i === doneIndex + 1) marker = ' <-- BER length start';
+        else if (i === resultCodePos) marker = ' <-- Result code position';
+        console.log(`    [${i}] = 0x${toHexSearch(byte)} (${byte}) '${ascii}'${marker}`);
+      }
+      
+      // Validate if this looks like a real LDAP result code
+      const isValidLdapResultCode = searchResultCode >= 0 && searchResultCode <= 0x50;
+      console.log(`  Is valid LDAP result code (0-80): ${isValidLdapResultCode}`);
+      if (!isValidLdapResultCode) {
+        console.log(`  WARNING: 0x${toHexSearch(searchResultCode)} (${searchResultCode}) is not a standard LDAP result code!`);
+        console.log(`  This suggests we may be reading ASCII text instead of LDAP protocol data.`);
+      }
       if (searchResultCode !== 0x00) {
         const errorMsg = getLdapErrorMessage(searchResultCode);
         throw new Error(`Search failed: ${errorMsg}`);
