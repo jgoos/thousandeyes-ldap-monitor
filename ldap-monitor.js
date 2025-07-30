@@ -1441,22 +1441,35 @@ async function runTest() {
         console.log(`  This suggests we may be reading ASCII text instead of LDAP protocol data.`);
       }
       if (searchResultCode !== 0x00) {
-        // Include hex dump directly in error message for visibility
+        // Compact hex dump for GUI visibility (permissions-friendly)
         const hexDumpLines = [];
-        hexDumpLines.push(`\nBYTE-LEVEL DEBUG (SearchResultDone parsing):`);
-        hexDumpLines.push(`doneIndex: ${doneIndex}, BER length: ${resultLengthInfo.length} (${resultLengthInfo.bytesUsed} bytes), resultCodePos: ${resultCodePos}`);
-        hexDumpLines.push(`Response length: ${searchRspLength}, Hex dump around result position:`);
+        hexDumpLines.push(`\nDEBUG: doneIndex=${doneIndex}, BER len=${resultLengthInfo.length}(${resultLengthInfo.bytesUsed}b), resultPos=${resultCodePos}, respLen=${searchRspLength}`);
         
-        const debugStart = Math.max(0, doneIndex - 5);
-        const debugEnd = Math.min(searchRspLength, resultCodePos + 10);
-        for (let i = debugStart; i < debugEnd; i++) {
+        // Show only critical bytes around the issue
+        const compactStart = Math.max(0, doneIndex - 2);
+        const compactEnd = Math.min(searchRspLength, resultCodePos + 3);
+        const compactBytes = [];
+        for (let i = compactStart; i < compactEnd; i++) {
           const byte = searchRsp[i];
           const ascii = (byte >= 32 && byte <= 126) ? String.fromCharCode(byte) : '.';
           let marker = '';
-          if (i === doneIndex) marker = ' <-- SearchResultDone';
-          else if (i === doneIndex + 1) marker = ' <-- BER length';
-          else if (i === resultCodePos) marker = ' <-- Result code';
-          hexDumpLines.push(`[${i}] = 0x${toHexSearch(byte)} (${byte}) '${ascii}'${marker}`);
+          if (i === doneIndex) marker = '(SRD)';
+          else if (i === doneIndex + 1) marker = '(LEN)';
+          else if (i === resultCodePos) marker = '(RC!)';
+          compactBytes.push(`[${i}]=0x${toHexSearch(byte)}/${ascii}${marker}`);
+        }
+        hexDumpLines.push(`Key bytes: ${compactBytes.join(' ')}`);
+        
+        // Check if we're reading "People" text
+        const surroundingText = [];
+        for (let i = Math.max(0, resultCodePos - 3); i < Math.min(searchRspLength, resultCodePos + 4); i++) {
+          const byte = searchRsp[i];
+          if (byte >= 32 && byte <= 126) {
+            surroundingText.push(String.fromCharCode(byte));
+          }
+        }
+        if (surroundingText.length > 0) {
+          hexDumpLines.push(`ASCII context: "${surroundingText.join('')}"`);
         }
         
         const errorMsg = getLdapErrorMessage(searchResultCode);
