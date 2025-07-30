@@ -572,45 +572,52 @@ async function runTest() {
   /**
    * Intelligently find SearchResultDone (0x65) in proper LDAP message context
    * @param {any} response - The response buffer to search
-   * @returns {number} Index of valid SearchResultDone or -1 if not found
+   * @returns {object} {index: number, debugInfo: string} - Index and debug information
    */
   const findSearchDoneIndex = (response) => {
     try {
-      if (!response || !response.length) return -1;
+      if (!response || !response.length) return { index: -1, debugInfo: 'No response data provided' };
       
       // Look for 0x65 in proper LDAP context, not just any 0x65 byte
       // SearchResultDone should be followed by proper LDAP length encoding
-      for (let i = response.length - 1; i >= 0; i--) {
+      console.log(`\nDEBUG: Scanning for SearchResultDone (0x65) in ${response.length} byte response...`);
+      
+        for (let i = response.length - 1; i >= 0; i--) {
         if (response[i] === 0x65) {
+          console.log(`\n=== Analyzing 0x65 at position ${i} ===`);
+          
           // Validate this is a real LDAP SearchResultDone, not ASCII text
           
           // Check if we have enough bytes after 0x65 for length + result code
           if (i + 2 >= response.length) {
-            console.log(`Found 0x65 at position ${i} but insufficient bytes for LDAP message (need ${i + 2}, have ${response.length})`);
+            console.log(`REJECT: Insufficient bytes for LDAP message (need ${i + 2}, have ${response.length})`);
             continue; // Not enough bytes for a minimal LDAP message
           }
           
           // Parse the BER length field properly
           const lengthInfo = parseBerLength(response, i + 1);
           if (!lengthInfo) {
-            console.log(`Found 0x65 at position ${i} but invalid BER length encoding`);
+            console.log(`REJECT: Invalid BER length encoding at position ${i + 1}, byte = 0x${toHexSearch(response[i + 1])}`);
             continue; // Not a valid BER length, likely ASCII text
           }
+          console.log(`PASS: Valid BER length = ${lengthInfo.length} (${lengthInfo.bytesUsed} bytes used)`);
           
           // Critical: Validate BER length doesn't exceed available bytes
           const availableBytes = response.length - i;
           const totalMessageSize = 1 + lengthInfo.bytesUsed + lengthInfo.length; // tag + length field + content
           if (totalMessageSize > availableBytes) {
-            console.log(`Found 0x65 at position ${i} but BER length ${lengthInfo.length} exceeds available bytes (need ${totalMessageSize}, have ${availableBytes}) - likely ASCII text`);
+            console.log(`REJECT: BER length ${lengthInfo.length} exceeds available bytes (need ${totalMessageSize}, have ${availableBytes})`);
             continue; // BER length is impossible, definitely ASCII text
           }
+          console.log(`PASS: BER boundary check (need ${totalMessageSize}, have ${availableBytes})`);
           
           // Check if we have enough bytes for the result code
           const resultCodePos = i + 1 + lengthInfo.bytesUsed;
           if (resultCodePos >= response.length) {
-            console.log(`Found 0x65 at position ${i} but insufficient bytes for result code (need ${resultCodePos + 1}, have ${response.length})`);
+            console.log(`REJECT: Insufficient bytes for result code (need position ${resultCodePos}, have ${response.length})`);
             continue; // Not enough bytes for result code
           }
+          console.log(`PASS: Result code position ${resultCodePos} is available`);
           
           // Enhanced ASCII text detection: check for text patterns around this position
           const textCheckStart = Math.max(0, i - 5);
@@ -641,11 +648,15 @@ async function runTest() {
           
           const isInLdapStructure = nearestSequence <= 10; // Within 10 bytes of a SEQUENCE
           
+          // ASCII text analysis
+          console.log(`ASCII analysis: ${Math.round(asciiRatio*100)}% ASCII (${asciiCount}/${contextLength}), ${textPatterns} text patterns, ${nearestSequence} bytes from SEQUENCE`);
+          
           // Only reject ASCII if it's both >80% ASCII AND far from LDAP structure
           if (asciiRatio > 0.8 && textPatterns >= 2 && !isInLdapStructure) {
-            console.log(`Found 0x65 at position ${i} but context is ${Math.round(asciiRatio*100)}% ASCII with ${textPatterns} text patterns and ${nearestSequence} bytes from SEQUENCE - likely pure text`);
+            console.log(`REJECT: High ASCII ratio (${Math.round(asciiRatio*100)}%) with ${textPatterns} text patterns and far from SEQUENCE (${nearestSequence} bytes)`);
             continue; // This is pure ASCII text, not LDAP protocol data
           }
+          console.log(`PASS: ASCII analysis (acceptable ratio or within LDAP structure)`);
           
           // Additional validation: check if this 0x65 is preceded by reasonable LDAP structure
           // Look for SEQUENCE (0x30) somewhere before this position
@@ -658,9 +669,10 @@ async function runTest() {
           }
           
           if (!foundSequenceBefore) {
-            console.log(`Found 0x65 at position ${i} but no SEQUENCE (0x30) found in preceding 20 bytes - likely ASCII text`);
+            console.log(`REJECT: No SEQUENCE (0x30) found in preceding 20 bytes`);
             continue; // No LDAP message structure found before this 0x65
           }
+          console.log(`PASS: SEQUENCE found in preceding bytes`);
           
           console.log(`Found valid SearchResultDone (0x65) at position ${i} with proper LDAP context`);
           console.log(`  BER length: ${lengthInfo.length} bytes (${lengthInfo.bytesUsed} octets used)`);
@@ -680,15 +692,94 @@ async function runTest() {
             console.log(`    [${j}] = 0x${toHexSearch(byte)} (${byte}) '${ascii}'${marker}`);
           }
           
-          return i; // This looks like a real LDAP SearchResultDone
+          return { index: i, debugInfo: null }; // This looks like a real LDAP SearchResultDone
         }
       }
       
-      console.log('No valid SearchResultDone found in LDAP message context');
-      return -1;
+      console.log('\n=== FINAL RESULT ===');
+      console.log('No valid SearchResultDone found in LDAP message context after checking all 0x65 positions');
+      
+      // Collect debugging info for error message since console.log may not be visible
+      const debugSummary = [];
+      debugSummary.push(`SEARCHRESULTDONE VALIDATION SUMMARY:`);
+      debugSummary.push(`Total response length: ${response.length} bytes`);
+      
+      // Re-analyze each 0x65 position with brief summary for error message
+      const found65Positions = [];
+      for (let i = 0; i < response.length; i++) {
+        if (response[i] === 0x65) found65Positions.push(i);
+      }
+      
+      debugSummary.push(`Found 0x65 at positions: ${found65Positions.join(', ')}`);
+      
+      for (const pos of found65Positions) {
+        debugSummary.push(`Position ${pos}:`);
+        
+        // Quick validation summary
+        if (pos + 2 >= response.length) {
+          debugSummary.push(`  REJECT: Insufficient bytes`);
+          continue;
+        }
+        
+        const lengthInfo = parseBerLength(response, pos + 1);
+        if (!lengthInfo) {
+          debugSummary.push(`  REJECT: Invalid BER (byte=${response[pos + 1]})`);
+          continue;
+        }
+        
+        const availableBytes = response.length - pos;
+        const totalMessageSize = 1 + lengthInfo.bytesUsed + lengthInfo.length;
+        if (totalMessageSize > availableBytes) {
+          debugSummary.push(`  REJECT: BER boundary (need ${totalMessageSize}, have ${availableBytes})`);
+          continue;
+        }
+        
+        // ASCII analysis
+        const contextStart = Math.max(0, pos - 5);
+        const contextEnd = Math.min(response.length, pos + 8);
+        let asciiCount = 0;
+        let textPatterns = 0;
+        for (let j = contextStart; j < contextEnd; j++) {
+          if (response[j] >= 32 && response[j] <= 126) asciiCount++;
+          if (response[j] === 0x2c || response[j] === 0x3d || response[j] === 0x6f) textPatterns++;
+        }
+        const asciiRatio = asciiCount / (contextEnd - contextStart);
+        
+        let nearestSequence = 999;
+        for (let seq = 1; seq <= Math.min(20, pos); seq++) {
+          if (response[pos - seq] === 0x30) {
+            nearestSequence = seq;
+            break;
+          }
+        }
+        
+        const isInLdapStructure = nearestSequence <= 10;
+        if (asciiRatio > 0.8 && textPatterns >= 2 && !isInLdapStructure) {
+          debugSummary.push(`  REJECT: ASCII text (${Math.round(asciiRatio*100)}% ASCII, ${textPatterns} patterns, ${nearestSequence}b from SEQ)`);
+          continue;
+        }
+        
+        let foundSequenceBefore = false;
+        for (let j = Math.max(0, pos - 20); j < pos; j++) {
+          if (response[j] === 0x30) {
+            foundSequenceBefore = true;
+            break;
+          }
+        }
+        
+        if (!foundSequenceBefore) {
+          debugSummary.push(`  REJECT: No SEQUENCE in preceding 20 bytes`);
+          continue;
+        }
+        
+        debugSummary.push(`  ACCEPT: Should be valid! (This shouldn't happen)`);
+      }
+      
+      // Return both index and debug info
+      return { index: -1, debugInfo: debugSummary.join('\n') };
     } catch (error) {
       console.log(`Error in findSearchDoneIndex: ${error.message}`);
-      return -1;
+      return { index: -1, debugInfo: `Error in findSearchDoneIndex: ${error.message}` };
     }
   };
   /* --------------------------------------------------------------------- */
@@ -724,9 +815,9 @@ async function runTest() {
       let connectPromise;
       if (port === 636) {
         const tlsOptions = {
-          minVersion: tlsMinVersion,
-          rejectUnauthorized: true,
-          servername: host
+              minVersion: tlsMinVersion,
+              rejectUnauthorized: true,
+              servername: host
         };
         
         // Add CA certificate if provided
@@ -821,7 +912,7 @@ async function runTest() {
         // Provide more specific error message for certificate issues
         if (errorMsg.includes('certificate') || errorMsg.includes('CERT_') || errorMsg.includes('SSL') || errorMsg.includes('TLS')) {
           throw new Error(`TLS/Certificate validation failed after ${maxRetries + 1} attempts: ${errorMsg}. ${!caBase64 && port === 636 ? 'Consider providing ldapCaBase64 credential (base64-encoded) for self-signed certificates.' : ''}`);
-        }
+      }
         throw new Error(`Connection failed after ${maxRetries + 1} attempts: ${errorMsg}`);
       }
       
@@ -955,7 +1046,7 @@ async function runTest() {
         
         if (resultCode !== 0x00) {
           const errorMsg = getLdapErrorMessage(resultCode);
-          throw new Error(`Bind failed: ${errorMsg}`);
+        throw new Error(`Bind failed: ${errorMsg}`);
         }
         
         console.log('Bind successful - result code 0x00');
@@ -1318,7 +1409,8 @@ async function runTest() {
       }
     }
 
-    const doneIndex = findSearchDoneIndex(searchRsp);
+    const doneResult = findSearchDoneIndex(searchRsp);
+    const doneIndex = doneResult.index;
     const searchRspLength = searchRsp && searchRsp.length ? searchRsp.length : 0;
     
     console.log(`SearchResultDone analysis:`);
@@ -1399,7 +1491,12 @@ async function runTest() {
         debugInfo.push(`3. Message chunking issue - incomplete response received`);
         debugInfo.push(`4. Server sent error response in unexpected format`);
         
-        throw new Error(`Search failed: No SearchResultDone message found\n\n${debugInfo.join('\n')}`);
+        // Include SearchResultDone validation details if available
+        let finalDebugInfo = debugInfo.join('\n');
+        if (doneResult.debugInfo) {
+          finalDebugInfo += '\n\n' + doneResult.debugInfo;
+        }
+        throw new Error(`Search failed: No SearchResultDone message found\n\n${finalDebugInfo}`);
       }
     } else {
       // Parse BER length to determine minimum required bytes
@@ -1483,7 +1580,7 @@ async function runTest() {
         console.log(`  WARNING: 0x${toHexSearch(searchResultCode)} (${searchResultCode}) is not a standard LDAP result code!`);
         console.log(`  This suggests we may be reading ASCII text instead of LDAP protocol data.`);
       }
-      if (searchResultCode !== 0x00) {
+    if (searchResultCode !== 0x00) {
         // Compact hex dump for GUI visibility (permissions-friendly)
         const hexDumpLines = [];
         hexDumpLines.push(`\nDEBUG: doneIndex=${doneIndex}, BER len=${resultLengthInfo.length}(${resultLengthInfo.bytesUsed}b), resultPos=${resultCodePos}, respLen=${searchRspLength}`);
