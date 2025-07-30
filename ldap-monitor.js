@@ -495,28 +495,63 @@ async function runTest() {
   };
 
   /**
-   * Safely find the last index of SearchResultDone marker (0x65)
+   * Intelligently find SearchResultDone (0x65) in proper LDAP message context
    * @param {any} response - The response buffer to search
-   * @returns {number} Index of last 0x65 or -1 if not found
+   * @returns {number} Index of valid SearchResultDone or -1 if not found
    */
   const findSearchDoneIndex = (response) => {
     try {
-      if (!response) return -1;
+      if (!response || !response.length) return -1;
       
-      // Try using lastIndexOf if available
-      if ('lastIndexOf' in response && typeof response.lastIndexOf === 'function') {
-        return response.lastIndexOf(0x65);
-      }
-      
-      // Fallback: manual search from end
-      if (response.length && typeof response.length === 'number') {
-        for (let i = response.length - 1; i >= 0; i--) {
-          if (response[i] === 0x65) return i;
+      // Look for 0x65 in proper LDAP context, not just any 0x65 byte
+      // SearchResultDone should be followed by proper LDAP length encoding
+      for (let i = response.length - 1; i >= 0; i--) {
+        if (response[i] === 0x65) {
+          // Validate this is a real LDAP SearchResultDone, not ASCII text
+          
+          // Check if we have enough bytes after 0x65 for length + result code
+          if (i + 4 >= response.length) {
+            console.log(`Found 0x65 at position ${i} but insufficient bytes for LDAP message (need ${i + 4}, have ${response.length})`);
+            continue; // Not enough bytes for a complete LDAP message
+          }
+          
+          // Check if the byte after 0x65 looks like a valid BER length
+          const lengthByte = response[i + 1];
+          
+          // BER length encoding: 
+          // - 0x00-0x7F = short form (0-127 bytes)
+          // - 0x81-0x84 = long form (1-4 length octets) for most practical cases
+          const isValidBerLength = (lengthByte <= 0x7F) || (lengthByte >= 0x81 && lengthByte <= 0x84);
+          
+          if (!isValidBerLength) {
+            console.log(`Found 0x65 at position ${i} but next byte 0x${lengthByte.toString(16)} is not valid BER length encoding`);
+            continue; // Not a valid BER length, likely ASCII text
+          }
+          
+          // Additional validation: check if this 0x65 is preceded by reasonable LDAP structure
+          // Look for SEQUENCE (0x30) somewhere before this position
+          let foundSequenceBefore = false;
+          for (let j = Math.max(0, i - 20); j < i; j++) {
+            if (response[j] === 0x30) {
+              foundSequenceBefore = true;
+              break;
+            }
+          }
+          
+          if (!foundSequenceBefore) {
+            console.log(`Found 0x65 at position ${i} but no SEQUENCE (0x30) found in preceding 20 bytes - likely ASCII text`);
+            continue; // No LDAP message structure found before this 0x65
+          }
+          
+          console.log(`Found valid SearchResultDone (0x65) at position ${i} with proper LDAP context`);
+          return i; // This looks like a real LDAP SearchResultDone
         }
       }
       
+      console.log('No valid SearchResultDone found in LDAP message context');
       return -1;
     } catch (error) {
+      console.log(`Error in findSearchDoneIndex: ${error.message}`);
       return -1;
     }
   };
