@@ -63,7 +63,7 @@ const getTestConfig = () => {
     slowMs: 300,                                            // alert threshold in ms
     baseDN: ldapBaseDN || '',                               // Override via ldapBaseDN credential ('' = Root DSE - may not work on all servers)
     fallbackSearch: !ldapBaseDN,                            // Use fallback search strategy if no base DN provided
-    filterAttr: baseDN === '' ? 'objectClass' : 'uid',       // use objectClass for Root DSE, uid for specific DNs
+    filterAttr: !ldapBaseDN ? 'objectClass' : 'uid',        // use objectClass for Root DSE, uid for specific DNs
     retryDelayMs: 100,                                      // delay between retries
     maxRetries: 2,                                          // max retry attempts
     tlsMinVersion: 'TLSv1.2',                               // minimum TLS version
