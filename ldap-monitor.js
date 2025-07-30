@@ -58,6 +58,17 @@ const getTestConfig = () => {
     console.log(`  ldapPort: ${ldapPort ? `'${ldapPort}'` : 'null/undefined'}`);
     console.log(`  ldapBaseDN: ${ldapBaseDN ? `'${ldapBaseDN}'` : 'null/undefined'}`);
     
+    // Additional debugging
+    console.log(`Debug - Raw credential check:`);
+    try {
+      const rawBaseDN = credentials.get('ldapBaseDN');
+      console.log(`  Direct credentials.get('ldapBaseDN'): ${rawBaseDN ? `'${rawBaseDN}'` : 'null/undefined'}`);
+      console.log(`  Type: ${typeof rawBaseDN}`);
+      console.log(`  Length: ${rawBaseDN ? rawBaseDN.length : 'N/A'}`);
+    } catch (err) {
+      console.log(`  Error getting ldapBaseDN: ${err.message}`);
+    }
+    
   } catch (e) {
     // Credentials may not exist, use defaults
     console.log(`Debug - Error retrieving credentials: ${e.message}`);
