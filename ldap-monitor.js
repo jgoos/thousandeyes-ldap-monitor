@@ -597,7 +597,15 @@ async function runTest() {
             continue; // Not a valid BER length, likely ASCII text
           }
           
-          // Check if we have enough bytes for the complete message
+          // Critical: Validate BER length doesn't exceed available bytes
+          const availableBytes = response.length - i;
+          const totalMessageSize = 1 + lengthInfo.bytesUsed + lengthInfo.length; // tag + length field + content
+          if (totalMessageSize > availableBytes) {
+            console.log(`Found 0x65 at position ${i} but BER length ${lengthInfo.length} exceeds available bytes (need ${totalMessageSize}, have ${availableBytes}) - likely ASCII text`);
+            continue; // BER length is impossible, definitely ASCII text
+          }
+          
+          // Check if we have enough bytes for the result code
           const resultCodePos = i + 1 + lengthInfo.bytesUsed;
           if (resultCodePos >= response.length) {
             console.log(`Found 0x65 at position ${i} but insufficient bytes for result code (need ${resultCodePos + 1}, have ${response.length})`);
