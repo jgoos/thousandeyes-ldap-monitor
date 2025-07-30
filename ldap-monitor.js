@@ -762,12 +762,14 @@ async function runTest() {
       console.log(`Note: Using objectClass filter for Root DSE search (standard approach)`);
     } else {
       console.log(`Note: Using uid filter for organizational DN search`);
+      console.log(`HINT: If you get response type 0x82 errors, try changing filterAttr from 'uid' to 'objectClass' in the script`);
     }
     console.log(`Search target: base DN '${baseDN}' with ${searchScope === 0 ? 'base scope (0) - searching only the exact DN object' : 'subtree scope (2) - searching beneath the DN'}`);
     
     // For debugging: log what we expect to find
     if (baseDN.includes('ou=People') && searchScope === 2) {
       console.log(`Info: Subtree scope search on organizational unit should find user objects beneath it.`);
+      console.log(`TROUBLESHOOTING: If this fails with 0x82, the server might not support uid filter on this DN`);
     }
     
     const searchReqBody = Buffer.concat([
@@ -878,6 +880,49 @@ async function runTest() {
         // Continue processing - this might be valid
       } else if (responseType === 0x64) {
         console.log('Received SearchResultEntry - search found results');
+      } else if (responseType === 0x82) {
+        // Handle 0x82 separately before the general error handling
+        console.log('Received response type 0x82 - checking for valid LDAP response...');
+        
+        // Enhanced debugging for 0x82 response
+        console.log('Full response analysis for 0x82:');
+        for (let i = 0; i < (searchRsp.length < 20 ? searchRsp.length : 20); i++) {
+          console.log(`  [${i}] = 0x${toHexSearch(searchRsp[i])} (${searchRsp[i]})`);
+        }
+        
+        // Check if this might be a SearchResultDone with context-specific encoding
+        let foundResultCode = null;
+        for (let i = 8; i < searchRsp.length && i < 30; i++) {
+          if (searchRsp[i] === 0x0A) { // ENUMERATED result code
+            if (i + 1 < searchRsp.length) {
+              foundResultCode = searchRsp[i + 1];
+              console.log(`Found potential result code at position ${i + 1}: 0x${toHexSearch(foundResultCode)} (${foundResultCode})`);
+              break;
+            }
+          }
+        }
+        
+        if (foundResultCode === 0x00) {
+          console.log('Response type 0x82 contains success result code (0x00) - treating as successful search completion');
+          console.log('Continuing with search completion processing...');
+          // Continue to the SearchResultDone analysis below
+        } else {
+          // Handle error case for 0x82
+          const errorDetails = `LDAP Search Failed: Response type 0x82 with result code 0x${foundResultCode ? toHexSearch(foundResultCode) : 'unknown'}`;
+          let debugSection = `\n\nDEBUG INFORMATION:`;
+          debugSection += `\n- Response type 0x82 may indicate a context-specific LDAP message encoding`;
+          debugSection += `\n- Search was: base='${baseDN}', scope=2, filter='(uid=*)'`;
+          debugSection += `\n- This suggests the search reached the server but returned an error`;
+          
+          let solution = `\n\nPOSSIBLE SOLUTIONS:`;
+          solution += `\n1. RECOMMENDED: Try changing the search filter in the script from 'uid' to 'objectClass'`;
+          solution += `\n2. Try using your exact bind DN as the base DN instead of '${baseDN}'`;
+          solution += `\n3. Try removing the ldapBaseDN credential to use Root DSE search`;
+          solution += `\n4. Check if the user has proper search permissions on '${baseDN}'`;
+          solution += `\n5. The server may use non-standard LDAP response encoding`;
+          
+          throw new Error(`${errorDetails}${debugSection}${solution}`);
+        }
       } else {
         // Look for the actual response type in the message
         const responseTypes = [];
