@@ -624,10 +624,14 @@ async function runTest() {
     }
     
 
-    /* 3 ▸ base-scope search  (messageID = 2) */
+    /* 3 ▸ flexible search  (messageID = 2) */
+    // Use subtree scope (2) for more flexibility, base scope (0) for exact match
+    const searchScope = baseDN === '' ? 0 : 2; // Base scope for Root DSE, subtree for specific DN
+    console.log(`Using search scope: ${searchScope} (0=base, 1=one-level, 2=subtree)`);
+    
     const searchReqBody = Buffer.concat([
       str(baseDN),         // baseObject
-      int(0),              // scope           0 = base
+      int(searchScope),    // scope           0 = base, 2 = subtree
       int(0),              // derefAliases    0 = never
       Buffer.from([0x02,0x02,0x03,0xE8]), // sizeLimit 1000
       Buffer.from([0x02,0x02,0x00,0x00]), // timeLimit 0
