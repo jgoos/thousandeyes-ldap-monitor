@@ -117,6 +117,15 @@ async function runTest() {
     console.log('Consider setting ldapBaseDN credential with a proper base DN (e.g., dc=company,dc=com)');
   } else {
     console.log(`Using base DN: '${baseDN}'`);
+    console.log(`Bind DN: '${bindDN}' (for comparison)`);
+    
+    // Check if base DN and bind DN are compatible
+    if (bindDN && bindDN.includes(baseDN)) {
+      console.log('✓ Base DN appears compatible with bind DN');
+    } else if (bindDN && baseDN !== '') {
+      console.log('⚠ Warning: Base DN may not be compatible with bind DN structure');
+      console.log('Consider using a base DN that encompasses your bind DN hierarchy');
+    }
   }
 
   /* Input validation */
