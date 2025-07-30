@@ -61,7 +61,7 @@ const getTestConfig = () => {
     port: parseInt(ldapPort) || 636,                        // Override via ldapPort credential (389 = LDAP, 636 = LDAPS)
     timeoutMs: testTimeout || 5000,                         // socket timeout from test settings
     slowMs: 300,                                            // alert threshold in ms
-    baseDN: ldapBaseDN || '',                               // Override via ldapBaseDN credential ('' = Root DSE)
+    baseDN: ldapBaseDN || '',                               // Override via ldapBaseDN credential ('' = Root DSE - may not work on all servers)
     filterAttr: 'objectClass',                              // attribute for present filter
     retryDelayMs: 100,                                      // delay between retries
     maxRetries: 2,                                          // max retry attempts
@@ -107,6 +107,14 @@ async function runTest() {
     } else {
       console.log('No CA certificate provided - will use system certificates');
     }
+  }
+  
+  // Warn about potential base DN issues
+  if (baseDN === '') {
+    console.log('Warning: Using empty base DN (Root DSE search). Some LDAP servers may not support this.');
+    console.log('Consider setting ldapBaseDN credential with a proper base DN (e.g., dc=company,dc=com)');
+  } else {
+    console.log(`Using base DN: '${baseDN}'`);
   }
 
   /* Input validation */
@@ -641,7 +649,7 @@ async function runTest() {
     markers.start('search');
     let searchRsp;
     try {
-      console.log(`Sending LDAP search request (${searchReq.length} bytes) - baseDN: '${baseDN}', filterAttr: '${filterAttr}'`);
+      console.log(`Sending LDAP search request (${searchReq.length} bytes) - baseDN: '${baseDN}' ${baseDN === '' ? '(Root DSE - may require ldapBaseDN credential)' : ''}, filterAttr: '${filterAttr}'`);
       const maxSearchReqBytes = searchReq.length < 32 ? searchReq.length : 32;
       console.log(`Search request hex (first 32 bytes): ${searchReq.slice(0, maxSearchReqBytes).toString('hex')}`);
       
@@ -732,7 +740,8 @@ async function runTest() {
           }
         }
         console.log(`Found LDAP response types: ${responseTypes.length > 0 ? responseTypes.join(', ') : 'none'}`);
-        throw new Error(`Search failed: Unexpected response type 0x${toHexSearch(responseType)} at position 8. Expected 0x64 (SearchResultEntry) or 0x65 (SearchResultDone)`);
+        const baseDnHint = baseDN === '' ? ' Consider setting ldapBaseDN credential with a valid base DN (e.g., dc=company,dc=com) instead of using Root DSE.' : '';
+        throw new Error(`Search failed: Unexpected response type 0x${toHexSearch(responseType)} at position 8. Expected 0x64 (SearchResultEntry) or 0x65 (SearchResultDone).${baseDnHint}`);
       }
     }
 
