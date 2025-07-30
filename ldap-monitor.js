@@ -45,41 +45,48 @@ const getTestConfig = () => {
   let ldapPort = null;
   let ldapBaseDN = null;
   
-  console.log('=== DETAILED CREDENTIAL DEBUG ===');
-  console.log('Checking credentials object availability...');
-  console.log(`credentials object exists: ${typeof credentials}`);
-  console.log(`credentials.get function exists: ${typeof credentials.get}`);
+  // Detailed credential debugging - make it visible in GUI via markers
+  let debugInfo = [];
+  debugInfo.push('CRED_DEBUG:');
+  debugInfo.push(`obj=${typeof credentials}`);
+  debugInfo.push(`get=${typeof credentials.get}`);
   
   try {
     // Test each credential individually
-    console.log('Testing ldapHost...');
     ldapHost = credentials.get('ldapHost');
-    console.log(`ldapHost result: ${ldapHost ? `'${ldapHost}'` : 'null/undefined'} (type: ${typeof ldapHost})`);
+    const hostStatus = ldapHost ? `'${ldapHost}'` : 'NULL';
+    debugInfo.push(`host=${hostStatus}`);
     
-    console.log('Testing ldapPort...');
     ldapPort = credentials.get('ldapPort');
-    console.log(`ldapPort result: ${ldapPort ? `'${ldapPort}'` : 'null/undefined'} (type: ${typeof ldapPort})`);
+    const portStatus = ldapPort ? `'${ldapPort}'` : 'NULL';
+    debugInfo.push(`port=${portStatus}`);
     
-    console.log('Testing ldapBaseDN...');
     ldapBaseDN = credentials.get('ldapBaseDN');
-    console.log(`ldapBaseDN result: ${ldapBaseDN ? `'${ldapBaseDN}'` : 'null/undefined'} (type: ${typeof ldapBaseDN})`);
+    const baseDnStatus = ldapBaseDN ? `'${ldapBaseDN}'` : 'NULL';
+    debugInfo.push(`baseDN=${baseDnStatus}`);
     
-    // Test the auth credentials to see if those work
-    console.log('Testing auth credentials for comparison...');
+    // Test auth credentials for comparison
     try {
       const testUser = credentials.get('ldapMonUser');
       const testPass = credentials.get('ldapMonPass');
-      console.log(`ldapMonUser works: ${testUser ? 'YES' : 'NO'}`);
-      console.log(`ldapMonPass works: ${testPass ? 'YES' : 'NO'}`);
+      debugInfo.push(`user=${testUser ? 'OK' : 'NULL'}`);
+      debugInfo.push(`pass=${testPass ? 'OK' : 'NULL'}`);
     } catch (authErr) {
-      console.log(`Auth credential test failed: ${authErr.message}`);
+      debugInfo.push(`auth_err=${authErr.message}`);
     }
     
+    // Set markers to make this visible in GUI
+    markers.set('credential-status', debugInfo.join('|'));
+    
   } catch (e) {
-    console.log(`ERROR in getTestConfig reading credentials: ${e.message}`);
-    console.log(`Error stack: ${e.stack}`);
+    debugInfo.push(`ERROR=${e.message}`);
+    markers.set('credential-error', e.message);
   }
-  console.log('=== END DETAILED DEBUG ===');
+  
+  // Log for console too
+  console.log('=== CREDENTIAL DEBUG ===');
+  console.log(debugInfo.join(' | '));
+  console.log('=== END DEBUG ===');
 
   // Configuration with secure credentials and sensible defaults
   return {
@@ -137,28 +144,32 @@ async function runTest() {
     }
   }
   
-  // Enhanced base DN debugging
-  console.log('=== BASE DN FINAL CHECK ===');
-  console.log(`Final baseDN value: '${baseDN}' (length: ${baseDN.length})`);
-  console.log(`Final bindDN value: '${bindDN}'`);
+  // Enhanced base DN debugging - make visible in GUI
+  let baseDnInfo = [];
+  baseDnInfo.push(`final_baseDN='${baseDN}'(len:${baseDN.length})`);
+  baseDnInfo.push(`bindDN='${bindDN}'`);
   
   if (baseDN === '') {
-    console.log('❌ WARNING: Using empty base DN (Root DSE search)');
-    console.log('This means ldapBaseDN credential was not read successfully!');
-    console.log('Expected: ou=People,o=asml');
-    console.log('Check the credential debugging above for the root cause.');
+    baseDnInfo.push('STATUS=EMPTY_BASE_DN!');
+    baseDnInfo.push('expected=ou=People,o=asml');
+    baseDnInfo.push('issue=ldapBaseDN_not_read');
+    markers.set('basedn-status', 'FAILED: Empty base DN - credential not read');
   } else {
-    console.log(`✅ Using base DN: '${baseDN}'`);
-    console.log(`Bind DN: '${bindDN}' (for comparison)`);
+    baseDnInfo.push(`STATUS=OK`);
+    markers.set('basedn-status', `OK: ${baseDN}`);
     
-    // Check if base DN and bind DN are compatible
+    // Check compatibility
     if (bindDN && bindDN.includes(baseDN)) {
-      console.log('✓ Base DN appears compatible with bind DN');
+      baseDnInfo.push('compat=YES');
     } else if (bindDN && baseDN !== '') {
-      console.log('⚠ Warning: Base DN may not be compatible with bind DN structure');
-      console.log('Consider using a base DN that encompasses your bind DN hierarchy');
+      baseDnInfo.push('compat=MAYBE');
     }
   }
+  
+  markers.set('basedn-debug', baseDnInfo.join('|'));
+  
+  console.log('=== BASE DN CHECK ===');
+  console.log(baseDnInfo.join(' | '));
   console.log('=== END BASE DN CHECK ===');
 
   /* Input validation */
@@ -805,32 +816,46 @@ async function runTest() {
         
         // If this is a fallback search and we get 0xbe, provide specific guidance
         if (responseType === 0xbe) {
-          const errorDetails = `Search failed: Response type 0xbe typically indicates "Invalid DN Syntax" or "Insufficient Access Rights".`;
+          // Include credential debug info in error message for GUI visibility
+          const credentialInfo = markers.get('credential-status') || 'No credential info';
+          const baseDnInfo = markers.get('basedn-debug') || 'No base DN info';
+          
+          const errorDetails = `🔍 LDAP Search Failed: Response type 0xbe (Invalid DN Syntax/Insufficient Access Rights)`;
+          let debugSection = `\n\n📊 CREDENTIAL DEBUG: ${credentialInfo}`;
+          debugSection += `\n📊 BASE DN DEBUG: ${baseDnInfo}`;
+          
           let solution;
           if (baseDN === '') {
-            solution = ' Solution: Add ldapBaseDN credential with your LDAP server\'s base DN (e.g., dc=company,dc=com, ou=users,dc=example,dc=org).';
+            solution = '\n\n💡 SOLUTION: The ldapBaseDN credential was not read! Add ldapBaseDN credential with value: ou=People,o=asml';
           } else {
-            solution = ` Current base DN: '${baseDN}'. Possible solutions:`;
-            solution += ` 1) The search filter has been changed from objectClass to uid to avoid restrictions`;
-            solution += ` 2) Check if your user has search permissions on '${baseDN}'`;
-            solution += ` 3) Try with an empty base DN (Root DSE) by removing ldapBaseDN credential`;
-            solution += ` 4) Consider using base scope (0) instead of subtree scope for more limited search`;
-            solution += ` 5) Verify the base DN exists and is searchable with LDAP browser tools`;
+            solution = `\n\n💡 SOLUTIONS for base DN '${baseDN}':`;
+            solution += `\n1) Verify your user has search permissions on '${baseDN}'`;
+            solution += `\n2) Try with empty base DN (Root DSE) by removing ldapBaseDN credential`;
+            solution += `\n3) Try with exact bind DN as base DN`;
+            solution += `\n4) Verify the base DN exists and is searchable with LDAP tools`;
           }
-          throw new Error(`${errorDetails}${solution}`);
+          throw new Error(`${errorDetails}${debugSection}${solution}`);
         }
         
         // Handle specific response types with detailed explanations
         if (responseType === 0x01) {
+          // Include credential debug info in error message for GUI visibility
+          const credentialInfo = markers.get('credential-status') || 'No credential info';
+          const baseDnInfo = markers.get('basedn-debug') || 'No base DN info';
+          
+          const errorDetails = `🔍 LDAP Search Failed: Response type 0x01 (Operations Error)`;
+          let debugSection = `\n\n📊 CREDENTIAL DEBUG: ${credentialInfo}`;
+          debugSection += `\n📊 BASE DN DEBUG: ${baseDnInfo}`;
+          
           let suggestion = '';
           if (baseDN === '') {
-            suggestion = ` Root DSE search failed. Try adding back ldapBaseDN credential with 'ou=People,o=asml' (which works in Apache Directory Studio).`;
+            suggestion = `\n\n💡 SOLUTION: The ldapBaseDN credential was not read! Add ldapBaseDN with 'ou=People,o=asml' (works in Apache Directory Studio)`;
           } else if (baseDN.includes('ou=People')) {
-            suggestion = ` The organizational DN search failed. This exact configuration works in Apache Directory Studio, so there may be a subtle protocol difference. Try your exact bind DN: 'uid=sa-iam-monitor,${baseDN}'.`;
+            suggestion = `\n\n💡 SOLUTION: Try your exact bind DN as base DN: 'uid=sa-iam-monitor,${baseDN}' OR remove ldapBaseDN for Root DSE search`;
           } else {
-            suggestion = ` Consider using your exact bind DN or try 'ou=People,o=asml' which works in Apache Directory Studio.`;
+            suggestion = `\n\n💡 SOLUTION: Try 'ou=People,o=asml' (works in Apache Directory Studio) or use your exact bind DN`;
           }
-          throw new Error(`Search failed: Response type 0x01 indicates an LDAP Operations Error. The search operation on '${baseDN || 'Root DSE'}' failed.${suggestion}`);
+          throw new Error(`${errorDetails}${debugSection}${suggestion}`);
         } else if (responseType === 0x78) {
           throw new Error(`Search failed: Response type 0x78 indicates an Extended Response. This may be an unsupported operation or protocol mismatch.`);
         } else {
