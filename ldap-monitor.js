@@ -612,6 +612,29 @@ async function runTest() {
             continue; // Not enough bytes for result code
           }
           
+          // Enhanced ASCII text detection: check for text patterns around this position
+          const textCheckStart = Math.max(0, i - 5);
+          const textCheckEnd = Math.min(response.length, i + 8);
+          let asciiCount = 0;
+          let textPatterns = 0;
+          
+          for (let j = textCheckStart; j < textCheckEnd; j++) {
+            const byte = response[j];
+            // Count printable ASCII characters
+            if (byte >= 32 && byte <= 126) asciiCount++;
+            // Check for common LDAP DN text patterns
+            if (byte === 0x2c || byte === 0x3d || byte === 0x6f) textPatterns++; // comma, equals, 'o'
+          }
+          
+          const contextLength = textCheckEnd - textCheckStart;
+          const asciiRatio = asciiCount / contextLength;
+          
+          // Reject if surrounded by too much ASCII text (>70% ASCII in context)
+          if (asciiRatio > 0.7 && textPatterns >= 2) {
+            console.log(`Found 0x65 at position ${i} but context is ${Math.round(asciiRatio*100)}% ASCII with ${textPatterns} text patterns - likely DN text`);
+            continue; // This is ASCII text like "People,o=asml", not LDAP protocol
+          }
+          
           // Additional validation: check if this 0x65 is preceded by reasonable LDAP structure
           // Look for SEQUENCE (0x30) somewhere before this position
           let foundSequenceBefore = false;
