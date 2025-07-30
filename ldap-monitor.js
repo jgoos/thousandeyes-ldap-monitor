@@ -165,19 +165,29 @@ const getTestConfig = () => {
   console.log(`- ldapPort: ${ldapPort ? `'${ldapPort}'` : 'null'}`);
   console.log(`- ldapBaseDN: ${ldapBaseDN ? `'${ldapBaseDN}'` : 'null'}`);
   
+  // Check for bind-only monitoring mode
+  let ldapBindOnly = null;
+  try {
+    ldapBindOnly = credentials.get('ldapBindOnly');
+    console.log(`ldapBindOnly credential: ${ldapBindOnly ? `'${ldapBindOnly}'` : 'not set'}`);
+  } catch (bindOnlyErr) {
+    console.log(`ldapBindOnly credential not available: ${bindOnlyErr.message}`);
+  }
+
   // Configuration with secure credentials and sensible defaults
   return {
     host: ldapHost || 'ldap.example.com',                   // Override via ldapHost credential
     port: parseInt(ldapPort) || 636,                        // Override via ldapPort credential (389 = LDAP, 636 = LDAPS)
     timeoutMs: testTimeout || 5000,                         // socket timeout from test settings
     slowMs: 300,                                            // alert threshold in ms
-    baseDN: ldapBaseDN || '',                               // Override via ldapBaseDN credential ('' = Root DSE - may not work on all servers)
+    baseDN: ldapBaseDN || 'USE_BIND_DN',                    // Override via ldapBaseDN credential, or 'USE_BIND_DN' to auto-use ldapMonUser DN
     fallbackSearch: !ldapBaseDN,                            // Use fallback search strategy if no base DN provided
     filterAttr: 'objectClass',                               // use objectClass for better compatibility across LDAP servers
     retryDelayMs: 100,                                      // delay between retries
     maxRetries: 2,                                          // max retry attempts
     tlsMinVersion: 'TLSv1.2',                               // minimum TLS version
-    serverName: ldapHost || 'LDAP Server'                   // For identification
+    serverName: ldapHost || 'LDAP Server',                  // For identification
+    bindOnlyMode: ldapBindOnly === 'true' || ldapBindOnly === '1' || ldapBindOnly === 'yes'  // Skip search, only verify bind
   };
 };
 
@@ -197,7 +207,8 @@ async function runTest() {
     maxRetries,
     tlsMinVersion,
     serverName,
-    fallbackSearch
+    fallbackSearch,
+    bindOnlyMode
   } = cfg;
   
   // Log which server we're testing for clarity
@@ -211,6 +222,18 @@ async function runTest() {
   const bindPwd = credentials.get('ldapMonPass');
   const caBase64 = credentials.get('ldapCaBase64');
   
+  // Auto-configure baseDN to use bind DN if requested
+  let effectiveBaseDN = baseDN;
+  let isAutoDetectedUserSearch = false;
+  if (baseDN === 'USE_BIND_DN' && bindDN) {
+    effectiveBaseDN = bindDN;
+    isAutoDetectedUserSearch = true;
+    console.log(`Auto-configured baseDN to use bind DN: '${effectiveBaseDN}'`);
+  } else if (baseDN === 'USE_BIND_DN' && !bindDN) {
+    effectiveBaseDN = '';
+    console.log(`Warning: USE_BIND_DN requested but no bindDN available, falling back to Root DSE`);
+  }
+  
   // Debug certificate information
   if (port === 636) {
     if (caBase64) {
@@ -223,22 +246,25 @@ async function runTest() {
   
   // Enhanced base DN debugging - make visible in GUI
   let baseDnInfo = [];
-  baseDnInfo.push(`final_baseDN='${baseDN}'(len:${baseDN.length})`);
+  baseDnInfo.push(`final_baseDN='${effectiveBaseDN}'(len:${effectiveBaseDN.length})`);
   baseDnInfo.push(`bindDN='${bindDN}'`);
+  if (baseDN === 'USE_BIND_DN') {
+    baseDnInfo.push('mode=AUTO_USE_BIND_DN');
+  }
   
-  if (baseDN === '') {
+  if (effectiveBaseDN === '') {
     baseDnInfo.push('STATUS=EMPTY_BASE_DN!');
     baseDnInfo.push('expected=ou=People,o=company');
     baseDnInfo.push('issue=ldapBaseDN_not_read');
     console.log('BASE DN STATUS: FAILED - Empty base DN, credential not read');
   } else {
     baseDnInfo.push(`STATUS=OK`);
-    console.log(`BASE DN STATUS: OK - Using ${baseDN}`);
+    console.log(`BASE DN STATUS: OK - Using ${effectiveBaseDN}`);
     
     // Check compatibility
-    if (bindDN && bindDN.includes(baseDN)) {
+    if (bindDN && bindDN.includes(effectiveBaseDN)) {
       baseDnInfo.push('compat=YES');
-    } else if (bindDN && baseDN !== '') {
+    } else if (bindDN && effectiveBaseDN !== '') {
       baseDnInfo.push('compat=MAYBE');
     }
   }
@@ -1063,31 +1089,56 @@ async function runTest() {
       markers.stop('bind');
     }
     
+    // Check if bind-only mode is enabled
+    if (bindOnlyMode) {
+      console.log('BIND-ONLY MODE: Skipping search operation as requested');
+      console.log('LDAP authentication verified successfully - monitoring complete');
+      
+      /* Total operation time */
+      const totalTime = metrics.bindEnd - metrics.connectionStart;
+      console.log(`Total operation time: ${totalTime} ms`);
+      
+      /* Performance summary */
+      console.log('Performance breakdown (bind-only mode):');
+      console.log(`  - Connection: ${metrics.connectionEnd - metrics.connectionStart} ms`);
+      console.log(`  - Bind: ${bindRTT} ms`); 
+      console.log(`  - Search: skipped (bind-only mode)`);
+      
+      return; // Skip search operation
+    }
 
     /* 3 ▸ flexible search  (messageID = 2) */
-    // Use subtree scope (2) for organizational DN searches, base scope (0) for Root DSE
-    // Subtree scope searches beneath the DN, which works for organizational units
-    const searchScope = baseDN === '' ? 0 : 2; // Subtree scope for specific DNs like ou=People
+    // Use base scope (0) for auto-detected user searches, subtree scope (2) for organizational searches
+    // Use the explicit flag set during auto-detection instead of comparing DN strings
+    const searchScope = (effectiveBaseDN === '' || isAutoDetectedUserSearch) ? 0 : 2;
+    
     console.log(`Using search scope: ${searchScope} (0=base, 1=one-level, 2=subtree)`);
+    console.log(`Search mode: ${isAutoDetectedUserSearch ? 'Auto-detected user search' : 'Manual/organizational search'}`);
     console.log(`Search filter: (${filterAttr}=*) - checking for presence of ${filterAttr} attribute`);
     console.log(`Note: Using objectClass filter for maximum LDAP server compatibility`);
-    if (baseDN === '') {
+    
+    if (effectiveBaseDN === '') {
       console.log(`Search type: Root DSE search (base DN is empty)`);
+    } else if (isAutoDetectedUserSearch) {
+      console.log(`Search type: Auto-detected user-specific search for monitor account '${effectiveBaseDN}'`);
     } else {
-      console.log(`Search type: Organizational DN search on '${baseDN}'`);
+      console.log(`Search type: Manual/organizational DN search on '${effectiveBaseDN}'`);
     }
-    console.log(`Search target: base DN '${baseDN}' with ${searchScope === 0 ? 'base scope (0) - searching only the exact DN object' : 'subtree scope (2) - searching beneath the DN'}`);
+    
+    console.log(`Search target: base DN '${effectiveBaseDN}' with ${searchScope === 0 ? 'base scope (0) - searching only the exact DN object' : 'subtree scope (2) - searching beneath the DN'}`);
     
     // For debugging: log what we expect to find
-    if (baseDN.includes('ou=People') && searchScope === 2) {
+    if (isAutoDetectedUserSearch) {
+      console.log(`Info: Base scope search for specific user should return exactly one entry (the monitor user).`);
+    } else if (effectiveBaseDN.includes('ou=People') && searchScope === 2) {
       console.log(`Info: Subtree scope search on organizational unit should find objects beneath it.`);
       console.log(`Using objectClass filter for broad compatibility across different LDAP implementations`);
-    } else if (baseDN === '') {
+    } else if (effectiveBaseDN === '') {
       console.log(`Info: Root DSE search should return server information and available naming contexts`);
     }
     
     const searchReqBody = Buffer.concat([
-      str(baseDN),         // baseObject
+      str(effectiveBaseDN),         // baseObject
       int(searchScope),    // scope           0 = base, 2 = subtree
       int(0),              // derefAliases    0 = never
       Buffer.from([0x02,0x02,0x03,0xE8]), // sizeLimit 1000
@@ -1112,7 +1163,7 @@ async function runTest() {
     markers.start('search');
     let searchRsp;
     try {
-      console.log(`Sending LDAP search request (${searchReq.length} bytes) - baseDN: '${baseDN}' ${baseDN === '' ? '(Root DSE - may require ldapBaseDN credential)' : ''}, filterAttr: '${filterAttr}'`);
+      console.log(`Sending LDAP search request (${searchReq.length} bytes) - baseDN: '${effectiveBaseDN}' ${effectiveBaseDN === '' ? '(Root DSE - may require ldapBaseDN credential)' : ''}, filterAttr: '${filterAttr}'`);
       const maxSearchReqBytes = searchReq.length < 32 ? searchReq.length : 32;
       console.log(`Search request hex (first 32 bytes): ${searchReq.slice(0, maxSearchReqBytes).toString('hex')}`);
       
@@ -1219,15 +1270,57 @@ async function runTest() {
           const errorDetails = `LDAP Search Failed: Response type 0x82 with result code 0x${foundResultCode ? toHexSearch(foundResultCode) : 'unknown'}`;
           let debugSection = `\n\nDEBUG INFORMATION:`;
           debugSection += `\n- Response type 0x82 may indicate a context-specific LDAP message encoding`;
-                        debugSection += `\n- Search was: base='${baseDN}', scope=2, filter='(objectClass=*)'`;
+                        debugSection += `\n- Search was: base='${effectiveBaseDN}', scope=2, filter='(objectClass=*)'`;
           debugSection += `\n- This suggests the search reached the server but returned an error`;
           
           let solution = `\n\nPOSSIBLE SOLUTIONS:`;
-          solution += `\n1. Try using your exact bind DN as the base DN instead of '${baseDN}'`;
+          solution += `\n1. Try using your exact bind DN as the base DN instead of '${effectiveBaseDN}'`;
           solution += `\n2. Try removing the ldapBaseDN credential to use Root DSE search`;
           solution += `\n3. Try base scope (0) instead of subtree scope (2) for more limited search`;
-          solution += `\n4. Check if the user has proper search permissions on '${baseDN}'`;
+          solution += `\n4. Check if the user has proper search permissions on '${effectiveBaseDN}'`;
           solution += `\n5. The server may use non-standard LDAP response encoding`;
+          
+          throw new Error(`${errorDetails}${debugSection}${solution}`);
+        }
+      } else if (responseType === 0x06) {
+        // Handle 0x06 response type specifically
+        console.log('Received response type 0x06 - analyzing...');
+        
+        // 0x06 could be a bind response that got mixed up, or server-specific response
+        // Since bind already succeeded, let's check if this is actually acceptable
+        
+        // Look for any result code in the response
+        let foundResultCode = null;
+        for (let i = 8; i < searchRsp.length && i < 30; i++) {
+          if (searchRsp[i] === 0x0A && i + 1 < searchRsp.length) { // ENUMERATED result code
+            foundResultCode = searchRsp[i + 1];
+            console.log(`Found potential result code at position ${i + 1}: 0x${toHexSearch(foundResultCode)} (${foundResultCode})`);
+            break;
+          }
+        }
+        
+        if (foundResultCode === 0x00) {
+          console.log('Response type 0x06 contains success result code (0x00) - treating as successful');
+          console.log('This may be a server-specific success response format');
+          // Continue processing as if successful
+        } else {
+          // Provide specific guidance for 0x06 errors
+          const errorDetails = isAutoDetectedUserSearch 
+            ? `LDAP Search Failed: Response type 0x06 in auto-detected user search (base scope)`
+            : `LDAP Search Failed: Response type 0x06 in manual search (subtree scope)`;
+          
+          let debugSection = `\n\nDEBUG INFORMATION:`;
+          debugSection += `\n- Response type 0x06 is non-standard for LDAP search operations`;
+          debugSection += `\n- Search was: base='${effectiveBaseDN}', scope=${searchScope}, filter='(objectClass=*)'`;
+          debugSection += `\n- Bind authentication already succeeded (${bindRTT}ms), so LDAP server is functional`;
+          debugSection += `\n- This suggests search operations may not be supported or configured properly`;
+          
+          let solution = `\n\nPOSSIBLE SOLUTIONS:`;
+          solution += `\n1. RECOMMENDED: Use bind-only monitoring (authentication verification without search)`;
+          solution += `\n2. Try different search filter (cn=* instead of objectClass=*)`;
+          solution += `\n3. Check LDAP server configuration for search operation support`;
+          solution += `\n4. Verify user has search permissions on their own entry`;
+          solution += `\n5. Consider this a server-specific response format (may be success)`;
           
           throw new Error(`${errorDetails}${debugSection}${solution}`);
         }
@@ -1240,13 +1333,13 @@ async function runTest() {
           }
         }
         console.log(`Found LDAP response types: ${responseTypes.length > 0 ? responseTypes.join(', ') : 'none'}`);
-        const baseDnHint = baseDN === '' ? ' Consider setting ldapBaseDN credential with a valid base DN (e.g., dc=company,dc=com) instead of using Root DSE.' : '';
+        const baseDnHint = effectiveBaseDN === '' ? ' Consider setting ldapBaseDN credential with a valid base DN (e.g., dc=company,dc=com) instead of using Root DSE.' : '';
         
         // If this is a fallback search and we get 0xbe, provide specific guidance
         if (responseType === 0xbe) {
           // Reconstruct debug info for error message
-          const credentialInfo = `host=${host}|port=${port}|baseDN=${baseDN || 'NULL'}|user=${bindDN ? 'OK' : 'NULL'}`;
-          const baseDnInfo = `final_baseDN='${baseDN}'|bindDN='${bindDN}'|status=${baseDN === '' ? 'EMPTY' : 'OK'}`;
+          const credentialInfo = `host=${host}|port=${port}|baseDN=${effectiveBaseDN || 'NULL'}|user=${bindDN ? 'OK' : 'NULL'}`;
+          const baseDnInfo = `final_baseDN='${effectiveBaseDN}'|bindDN='${bindDN}'|status=${effectiveBaseDN === '' ? 'EMPTY' : 'OK'}`;
           
           const errorDetails = `LDAP Search Failed: Response type 0xbe (Invalid DN Syntax/Insufficient Access Rights)`;
           let debugSection = `\n\nDEBUG INFORMATION:`;
@@ -1254,13 +1347,13 @@ async function runTest() {
           debugSection += `\n- Base DN Status: ${baseDnInfo}`;
           
           let solution;
-          if (baseDN === '') {
+          if (effectiveBaseDN === '') {
             solution = '\n\nSOLUTION:';
             solution += '\nThe ldapBaseDN credential was not read successfully.';
             solution += '\nAdd ldapBaseDN credential with your organization\'s base DN (e.g., ou=People,o=company)';
           } else {
-            solution = `\n\nPOSSIBLE SOLUTIONS for base DN '${baseDN}':`;
-            solution += `\n1. Verify your user has search permissions on '${baseDN}'`;
+            solution = `\n\nPOSSIBLE SOLUTIONS for base DN '${effectiveBaseDN}':`;
+            solution += `\n1. Verify your user has search permissions on '${effectiveBaseDN}'`;
             solution += `\n2. Try with empty base DN (Root DSE) by removing ldapBaseDN credential`;
             solution += `\n3. Try with exact bind DN as base DN`;
             solution += `\n4. Verify the base DN exists and is searchable with LDAP tools`;
@@ -1271,8 +1364,8 @@ async function runTest() {
         // Handle specific response types with detailed explanations
         if (responseType === 0x01) {
           // Reconstruct debug info for error message
-          const credentialInfo = `host=${host}|port=${port}|baseDN=${baseDN || 'NULL'}|user=${bindDN ? 'OK' : 'NULL'}`;
-          const baseDnInfo = `final_baseDN='${baseDN}'|bindDN='${bindDN}'|status=${baseDN === '' ? 'EMPTY' : 'OK'}`;
+          const credentialInfo = `host=${host}|port=${port}|baseDN=${effectiveBaseDN || 'NULL'}|user=${bindDN ? 'OK' : 'NULL'}`;
+          const baseDnInfo = `final_baseDN='${effectiveBaseDN}'|bindDN='${bindDN}'|status=${effectiveBaseDN === '' ? 'EMPTY' : 'OK'}`;
           
           const errorDetails = `LDAP Search Failed: Response type 0x01 (Operations Error)`;
           let debugSection = `\n\nDEBUG INFORMATION:`;
@@ -1280,13 +1373,13 @@ async function runTest() {
           debugSection += `\n- Base DN Status: ${baseDnInfo}`;
           
           let suggestion = '';
-          if (baseDN === '') {
+          if (effectiveBaseDN === '') {
             suggestion = `\n\nSOLUTION:`;
             suggestion += `\nThe ldapBaseDN credential was not read successfully.`;
             suggestion += `\nAdd ldapBaseDN with your organization's base DN (e.g., ou=People,o=company)`;
-          } else if (baseDN.includes('ou=People')) {
+          } else if (effectiveBaseDN.includes('ou=People')) {
             suggestion = `\n\nSOLUTION:`;
-            suggestion += `\nTry your exact bind DN as base DN: 'uid=your-monitor-user,${baseDN}'`;
+            suggestion += `\nTry your exact bind DN as base DN: 'uid=your-monitor-user,${effectiveBaseDN}'`;
             suggestion += `\nOR remove ldapBaseDN for Root DSE search`;
           } else {
             suggestion = `\n\nSOLUTION:`;
@@ -1622,15 +1715,17 @@ async function runTest() {
       throw new Error(`Slow search: ${searchRTT} ms (>${slowMs}ms threshold)`);
     }
 
-    /* Total operation time */
-    const totalTime = metrics.searchEnd - metrics.connectionStart;
-    console.log(`Total operation time: ${totalTime} ms`);
-    
-    /* Performance summary */
-    console.log('Performance breakdown:');
-    console.log(`  - Connection: ${metrics.connectionEnd - metrics.connectionStart} ms`);
-    console.log(`  - Bind: ${bindRTT} ms`); 
-    console.log(`  - Search: ${searchRTT} ms`);
+    /* Total operation time - only if search was performed */
+    if (!bindOnlyMode && metrics.searchEnd) {
+      const totalTime = metrics.searchEnd - metrics.connectionStart;
+      console.log(`Total operation time: ${totalTime} ms`);
+      
+      /* Performance summary */
+      console.log('Performance breakdown:');
+      console.log(`  - Connection: ${metrics.connectionEnd - metrics.connectionStart} ms`);
+      console.log(`  - Bind: ${bindRTT} ms`); 
+      console.log(`  - Search: ${searchRTT} ms`);
+    }
 
   } finally {
     /* Ensure socket is always closed */
@@ -1644,7 +1739,7 @@ async function runTest() {
   }
 }
 
-// Execute the test with proper error handling
+// Execute the LDAP test with proper error handling
 runTest().catch(err => {
   console.error('Test failed:', err && err.message || 'Unknown error');
   throw err;
