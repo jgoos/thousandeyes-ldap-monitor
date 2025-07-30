@@ -1098,20 +1098,54 @@ async function runTest() {
             console.log('This indicates search results were found - continuing processing');
             // Continue with normal processing
           } else {
-            // No clear LDAP response types found
-            const errorDetails = `LDAP Search Failed: Response type 0x10 (SEQUENCE) at position 8`;
-            let debugSection = `\n\nDEBUG INFORMATION:`;
-            debugSection += `\n- Response type 0x10 indicates a SEQUENCE tag, but no clear LDAP response types found`;
-            debugSection += `\n- Search was: base='${baseDN}', scope=2, filter='(objectClass=*)'`;
-            debugSection += `\n- Message length: ${searchRsp.length} bytes`;
+            // No clear LDAP response types found - enhanced debugging
+            const debugInfo = [];
+            debugInfo.push(`0x10 SEQUENCE RESPONSE DEBUG:`);
+            debugInfo.push(`- Response type 0x10 (SEQUENCE) found at position 8`);
+            debugInfo.push(`- No SearchResultEntry (0x64) or SearchResultDone (0x65) found`);
+            debugInfo.push(`- Search parameters: base='${baseDN}', scope=2, filter='(objectClass=*)'`);
+            debugInfo.push(`- Total message length: ${searchRsp.length} bytes`);
             
-            let solution = `\n\nPOSSIBLE SOLUTIONS:`;
-            solution += `\n1. Try base scope (0) instead of subtree scope (2)`;
-            solution += `\n2. Try using your exact bind DN as the base DN`;
-            solution += `\n3. Try removing the ldapBaseDN credential to use Root DSE search`;
-            solution += `\n4. The server may have a non-standard LDAP message format`;
+            // Enhanced hex dump analysis
+            debugInfo.push(`- Full message hex dump (first 50 bytes):`);
+            const dumpLen = Math.min(50, searchRsp.length);
+            for (let i = 0; i < dumpLen; i++) {
+              const marker = i === 8 ? ' <-- Response type' : '';
+              debugInfo.push(`  [${i}] = 0x${toHexSearch(searchRsp[i])} (${searchRsp[i]})${marker}`);
+            }
             
-            throw new Error(`${errorDetails}${debugSection}${solution}`);
+            // Look for any potential LDAP response patterns
+            const potentialResponses = [];
+            for (let i = 0; i < searchRsp.length; i++) {
+              if (searchRsp[i] >= 0x60 && searchRsp[i] <= 0x78) {
+                potentialResponses.push(`0x${toHexSearch(searchRsp[i])} at position ${i}`);
+              }
+            }
+            
+            if (potentialResponses.length > 0) {
+              debugInfo.push(`- Potential LDAP response bytes found: ${potentialResponses.join(', ')}`);
+            } else {
+              debugInfo.push(`- No LDAP response bytes (0x60-0x78) found in entire message`);
+            }
+            
+            // Look for common LDAP message patterns
+            const sequence30Positions = [];
+            for (let i = 0; i < searchRsp.length; i++) {
+              if (searchRsp[i] === 0x30) {
+                sequence30Positions.push(i);
+              }
+            }
+            debugInfo.push(`- SEQUENCE (0x30) tags found at positions: ${sequence30Positions.join(', ')}`);
+            
+            debugInfo.push(`DIAGNOSTIC SUGGESTIONS:`);
+            debugInfo.push(`1. This appears to be a valid LDAP message but with unexpected structure`);
+            debugInfo.push(`2. The server may use non-standard response encoding`);
+            debugInfo.push(`3. Try base scope (0) instead of subtree scope (2) for simpler response`);
+            debugInfo.push(`4. Try using your exact bind DN as the base DN`);
+            debugInfo.push(`5. Try removing ldapBaseDN credential to use Root DSE search`);
+            debugInfo.push(`6. Consider that the search may have succeeded but response format is non-standard`);
+            
+            throw new Error(`LDAP Search Failed: Response type 0x10 (SEQUENCE) - no standard LDAP response types found\n\n${debugInfo.join('\n')}`);
           }
         } else {
           throw new Error(`Search failed: Unexpected response type 0x${toHexSearch(responseType)} at position 8. Expected 0x64 (SearchResultEntry) or 0x65 (SearchResultDone).${baseDnHint}`);
@@ -1143,11 +1177,85 @@ async function runTest() {
           console.log('Warning: Could not determine result code from SearchResultDone');
         }
       } else {
-        throw new Error('Search failed: No SearchResultDone message found');
+        // Enhanced debugging for missing SearchResultDone
+        const debugInfo = [];
+        debugInfo.push(`NO SEARCHRESULTDONE DEBUG:`);
+        debugInfo.push(`- Total response length: ${searchRspLength} bytes`);
+        debugInfo.push(`- SearchResultDone index: ${doneIndex} (not found)`);
+        debugInfo.push(`- Search completed but no valid SearchResultDone marker found`);
+        
+        // Show response type analysis
+        if (searchRsp.length > 8) {
+          debugInfo.push(`- Response type at position 8: 0x${toHexSearch(searchRsp[8])} (${searchRsp[8]})`);
+          
+          // Scan for any 0x65 bytes in the response
+          const found65Positions = [];
+          for (let i = 0; i < searchRsp.length; i++) {
+            if (searchRsp[i] === 0x65) {
+              found65Positions.push(i);
+            }
+          }
+          
+          if (found65Positions.length > 0) {
+            debugInfo.push(`- Found 0x65 bytes at positions: ${found65Positions.join(', ')}`);
+            debugInfo.push(`- But none were recognized as valid SearchResultDone by findSearchDoneIndex()`);
+          } else {
+            debugInfo.push(`- No 0x65 (SearchResultDone) bytes found anywhere in response`);
+          }
+        }
+        
+        // Show hex dump of first and last parts of response
+        const firstBytes = Math.min(20, searchRsp.length);
+        const lastBytes = Math.min(20, searchRsp.length);
+        
+        debugInfo.push(`- First ${firstBytes} bytes of response:`);
+        for (let i = 0; i < firstBytes; i++) {
+          debugInfo.push(`  [${i}] = 0x${toHexSearch(searchRsp[i])} (${searchRsp[i]})`);
+        }
+        
+        if (searchRsp.length > 20) {
+          debugInfo.push(`- Last ${lastBytes} bytes of response:`);
+          for (let i = Math.max(0, searchRsp.length - lastBytes); i < searchRsp.length; i++) {
+            debugInfo.push(`  [${i}] = 0x${toHexSearch(searchRsp[i])} (${searchRsp[i]})`);
+          }
+        }
+        
+        debugInfo.push(`POSSIBLE CAUSES:`);
+        debugInfo.push(`1. Server returned non-standard LDAP response format`);
+        debugInfo.push(`2. Response is valid but uses different message structure`);
+        debugInfo.push(`3. Message chunking issue - incomplete response received`);
+        debugInfo.push(`4. Server sent error response in unexpected format`);
+        
+        throw new Error(`Search failed: No SearchResultDone message found\n\n${debugInfo.join('\n')}`);
       }
     } else {
       if (doneIndex + 4 >= searchRspLength) {
-        throw new Error('Search failed: SearchResultDone message truncated');
+        // Enhanced debugging for truncated SearchResultDone
+        const debugInfo = [];
+        debugInfo.push(`TRUNCATED SEARCHRESULTDONE DEBUG:`);
+        debugInfo.push(`- SearchResultDone found at index: ${doneIndex}`);
+        debugInfo.push(`- Total response length: ${searchRspLength} bytes`);
+        debugInfo.push(`- Need to read result code at position: ${doneIndex + 4}`);
+        debugInfo.push(`- Available bytes after SearchResultDone: ${searchRspLength - doneIndex}`);
+        debugInfo.push(`- Missing bytes: ${(doneIndex + 4) - searchRspLength + 1}`);
+        
+        // Show hex dump around the SearchResultDone position
+        const start = Math.max(0, doneIndex - 5);
+        const end = Math.min(searchRspLength, doneIndex + 10);
+        debugInfo.push(`- Hex dump around SearchResultDone (positions ${start}-${end-1}):`);
+        for (let i = start; i < end; i++) {
+          const marker = i === doneIndex ? ' <-- SearchResultDone' : '';
+          debugInfo.push(`  [${i}] = 0x${toHexSearch(searchRsp[i])} (${searchRsp[i]})${marker}`);
+        }
+        
+        // Provide solutions
+        debugInfo.push(`POSSIBLE CAUSES:`);
+        debugInfo.push(`1. Server sent incomplete LDAP message (network issue)`);
+        debugInfo.push(`2. Message chunking issue - response split across multiple reads`);
+        debugInfo.push(`3. Non-standard LDAP message format from server`);
+        debugInfo.push(`4. SearchResultDone detected incorrectly (false positive)`);
+        
+        throw new Error(`Search failed: SearchResultDone message truncated\n\n${debugInfo.join('\n')}`);
       }
       const searchResultCode = searchRsp[doneIndex + 4];
       console.log(`Search result code at position ${doneIndex + 4}: 0x${toHexSearch(searchResultCode)} (${searchResultCode})`);
