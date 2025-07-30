@@ -150,7 +150,7 @@ async function runTest() {
   
   if (baseDN === '') {
     baseDnInfo.push('STATUS=EMPTY_BASE_DN!');
-    baseDnInfo.push('expected=ou=People,o=asml');
+    baseDnInfo.push('expected=ou=People,o=company');
     baseDnInfo.push('issue=ldapBaseDN_not_read');
     console.log('❌ BASE DN STATUS: FAILED - Empty base DN, credential not read');
   } else {
@@ -823,7 +823,7 @@ async function runTest() {
           
           let solution;
           if (baseDN === '') {
-            solution = '\n\n💡 SOLUTION: The ldapBaseDN credential was not read! Add ldapBaseDN credential with value: ou=People,o=asml';
+            solution = '\n\n💡 SOLUTION: The ldapBaseDN credential was not read! Add ldapBaseDN credential with your organization\'s base DN (e.g., ou=People,o=company)';
           } else {
             solution = `\n\n💡 SOLUTIONS for base DN '${baseDN}':`;
             solution += `\n1) Verify your user has search permissions on '${baseDN}'`;
@@ -846,11 +846,11 @@ async function runTest() {
           
           let suggestion = '';
           if (baseDN === '') {
-            suggestion = `\n\n💡 SOLUTION: The ldapBaseDN credential was not read! Add ldapBaseDN with 'ou=People,o=asml' (works in Apache Directory Studio)`;
+            suggestion = `\n\n💡 SOLUTION: The ldapBaseDN credential was not read! Add ldapBaseDN with your organization's base DN (e.g., ou=People,o=company)`;
           } else if (baseDN.includes('ou=People')) {
-            suggestion = `\n\n💡 SOLUTION: Try your exact bind DN as base DN: 'uid=sa-iam-monitor,${baseDN}' OR remove ldapBaseDN for Root DSE search`;
+            suggestion = `\n\n💡 SOLUTION: Try your exact bind DN as base DN: 'uid=your-monitor-user,${baseDN}' OR remove ldapBaseDN for Root DSE search`;
           } else {
-            suggestion = `\n\n💡 SOLUTION: Try 'ou=People,o=asml' (works in Apache Directory Studio) or use your exact bind DN`;
+            suggestion = `\n\n💡 SOLUTION: Try your organization's base DN (e.g., ou=People,o=company) or use your exact bind DN`;
           }
           throw new Error(`${errorDetails}${debugSection}${suggestion}`);
         } else if (responseType === 0x78) {
