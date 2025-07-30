@@ -738,7 +738,7 @@ async function runTest() {
 
       // Check for LDAP message structure: 0x30 (SEQUENCE) at start
       if (bindRsp.length > 0 && bindRsp[0] !== 0x30) {
-        throw new Error(`Bind failed: Invalid LDAP message format - expected SEQUENCE (0x30), got 0x${bindRsp[0].toString(16)}`);
+        throw new Error(`Bind failed: Invalid LDAP message format - expected SEQUENCE (0x30), got 0x${Number(bindRsp[0]).toString(16)}`);
       }
 
       // Look for BindResponse (0x61) - might be at different position depending on message structure
@@ -757,7 +757,7 @@ async function runTest() {
         const maxScanLen = bindRsp.length < 20 ? bindRsp.length : 20;
         for (let i = 0; i < maxScanLen; i++) {
           if (bindRsp[i] >= 0x60 && bindRsp[i] <= 0x78) { // LDAP response range
-            responseTypes.push(`0x${bindRsp[i].toString(16)} at position ${i}`);
+            responseTypes.push(`0x${Number(bindRsp[i]).toString(16)} at position ${i}`);
           }
         }
         throw new Error(`Bind failed: No BindResponse (0x61) found in response. Found response types: ${responseTypes.length > 0 ? responseTypes.join(', ') : 'none'}`);
@@ -770,14 +770,14 @@ async function runTest() {
         if (bindResponsePosition !== 8) {
           console.log(`Warning: BindResponse found at position ${bindResponsePosition}, not the expected position 8`);
         } else {
-          throw new Error(`Bind failed: Unexpected response type 0x${bindRsp[8].toString(16)} (expected 0x61)`);
+          throw new Error(`Bind failed: Unexpected response type 0x${Number(bindRsp[8]).toString(16)} (expected 0x61)`);
         }
       }
 
       // Check result code - adjust position based on where BindResponse was found
       const resultCodePosition = bindResponsePosition + 4; // Result code typically 4 bytes after BindResponse
       if (bindRsp.length > resultCodePosition) {
-        const resultCode = bindRsp[resultCodePosition];
+        const resultCode = Number(bindRsp[resultCodePosition]);
         const resultHex = resultCode.toString(16);
         const paddedHex = resultHex.length === 1 ? '0' + resultHex : resultHex;
         console.log(`Result code at position ${resultCodePosition}: 0x${paddedHex} (${resultCode})`);
