@@ -40,38 +40,24 @@ const getTestConfig = () => {
     }
   }
 
-  // Try to get configuration from credentials (optional)
-  // These would be additional credentials beyond the auth credentials
+  // Read credentials directly here where they're used
   let ldapHost = null;
   let ldapPort = null;
   let ldapBaseDN = null;
   
   try {
-    // Optional configuration credentials (if available)
     ldapHost = credentials.get('ldapHost');
     ldapPort = credentials.get('ldapPort');
     ldapBaseDN = credentials.get('ldapBaseDN');
     
-    // Debug credential retrieval
-    console.log(`Debug - Credential values:`);
-    console.log(`  ldapHost: ${ldapHost ? `'${ldapHost}'` : 'null/undefined'}`);
-    console.log(`  ldapPort: ${ldapPort ? `'${ldapPort}'` : 'null/undefined'}`);
-    console.log(`  ldapBaseDN: ${ldapBaseDN ? `'${ldapBaseDN}'` : 'null/undefined'}`);
-    
-    // Additional debugging
-    console.log(`Debug - Raw credential check:`);
-    try {
-      const rawBaseDN = credentials.get('ldapBaseDN');
-      console.log(`  Direct credentials.get('ldapBaseDN'): ${rawBaseDN ? `'${rawBaseDN}'` : 'null/undefined'}`);
-      console.log(`  Type: ${typeof rawBaseDN}`);
-      console.log(`  Length: ${rawBaseDN ? rawBaseDN.length : 'N/A'}`);
-    } catch (err) {
-      console.log(`  Error getting ldapBaseDN: ${err.message}`);
-    }
+    console.log('=== getTestConfig Credential Debug ===');
+    console.log(`ldapHost: ${ldapHost || 'null'}`);
+    console.log(`ldapPort: ${ldapPort || 'null'}`);
+    console.log(`ldapBaseDN: ${ldapBaseDN || 'null'}`);
+    console.log('=== End getTestConfig Debug ===');
     
   } catch (e) {
-    // Credentials may not exist, use defaults
-    console.log(`Debug - Error retrieving credentials: ${e.message}`);
+    console.log(`ERROR in getTestConfig reading credentials: ${e.message}`);
   }
 
   // Configuration with secure credentials and sensible defaults
