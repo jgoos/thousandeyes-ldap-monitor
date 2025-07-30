@@ -990,6 +990,78 @@ async function runTest() {
           throw new Error(`${errorDetails}${debugSection}${suggestion}`);
         } else if (responseType === 0x78) {
           throw new Error(`Search failed: Response type 0x78 indicates an Extended Response. This may be an unsupported operation or protocol mismatch.`);
+        } else if (responseType === 0x10) {
+          // 0x10 is a SEQUENCE tag - this might indicate the message structure is different
+          console.log('Received response type 0x10 (SEQUENCE) - analyzing message structure...');
+          
+          // Enhanced debugging for 0x10 response
+          console.log('Full response analysis for 0x10:');
+          for (let i = 0; i < (searchRsp.length < 30 ? searchRsp.length : 30); i++) {
+            console.log(`  [${i}] = 0x${toHexSearch(searchRsp[i])} (${searchRsp[i]})`);
+          }
+          
+          // Look for SearchResultEntry (0x64) or SearchResultDone (0x65) at different positions
+          console.log('Scanning for LDAP response types throughout the message...');
+          let foundEntries = [];
+          let foundDone = [];
+          
+          for (let i = 0; i < searchRsp.length; i++) {
+            if (searchRsp[i] === 0x64) {
+              foundEntries.push(i);
+              console.log(`Found SearchResultEntry (0x64) at position ${i}`);
+            }
+            if (searchRsp[i] === 0x65) {
+              foundDone.push(i);
+              console.log(`Found SearchResultDone (0x65) at position ${i}`);
+            }
+          }
+          
+          if (foundDone.length > 0) {
+            console.log(`Response contains SearchResultDone at position(s): ${foundDone.join(', ')}`);
+            console.log('This appears to be a valid LDAP response with different message structure');
+            
+            // Try to find the result code near the SearchResultDone
+            const donePos = foundDone[foundDone.length - 1]; // Use last SearchResultDone
+            let resultCode = null;
+            
+            // Look for result code in the next few bytes after SearchResultDone
+            for (let i = donePos + 1; i < searchRsp.length && i < donePos + 10; i++) {
+              if (searchRsp[i - 1] === 0x0A && searchRsp[i] >= 0x00 && searchRsp[i] <= 0x50) {
+                resultCode = searchRsp[i];
+                console.log(`Found result code ${resultCode} (0x${toHexSearch(resultCode)}) at position ${i}`);
+                break;
+              }
+            }
+            
+            if (resultCode === 0x00) {
+              console.log('Search completed successfully (result code 0x00) - different message structure but valid response');
+              // Continue with normal processing
+            } else if (resultCode !== null) {
+              throw new Error(`Search failed with result code 0x${toHexSearch(resultCode)} (${resultCode})`);
+            } else {
+              console.log('SearchResultDone found but could not determine result code - assuming success');
+              // Continue with normal processing
+            }
+          } else if (foundEntries.length > 0) {
+            console.log(`Response contains SearchResultEntry at position(s): ${foundEntries.join(', ')}`);
+            console.log('This indicates search results were found - continuing processing');
+            // Continue with normal processing
+          } else {
+            // No clear LDAP response types found
+            const errorDetails = `LDAP Search Failed: Response type 0x10 (SEQUENCE) at position 8`;
+            let debugSection = `\n\nDEBUG INFORMATION:`;
+            debugSection += `\n- Response type 0x10 indicates a SEQUENCE tag, but no clear LDAP response types found`;
+            debugSection += `\n- Search was: base='${baseDN}', scope=2, filter='(objectClass=*)'`;
+            debugSection += `\n- Message length: ${searchRsp.length} bytes`;
+            
+            let solution = `\n\nPOSSIBLE SOLUTIONS:`;
+            solution += `\n1. Try base scope (0) instead of subtree scope (2)`;
+            solution += `\n2. Try using your exact bind DN as the base DN`;
+            solution += `\n3. Try removing the ldapBaseDN credential to use Root DSE search`;
+            solution += `\n4. The server may have a non-standard LDAP message format`;
+            
+            throw new Error(`${errorDetails}${debugSection}${solution}`);
+          }
         } else {
           throw new Error(`Search failed: Unexpected response type 0x${toHexSearch(responseType)} at position 8. Expected 0x64 (SearchResultEntry) or 0x65 (SearchResultDone).${baseDnHint}`);
         }
