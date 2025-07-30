@@ -45,7 +45,7 @@ const getTestConfig = () => {
   let ldapPort = null;
   let ldapBaseDN = null;
   
-  // Detailed credential debugging - make it visible in GUI via markers
+  // Detailed credential debugging - make it visible in console and accessible globally
   let debugInfo = [];
   debugInfo.push('CRED_DEBUG:');
   debugInfo.push(`obj=${typeof credentials}`);
@@ -75,18 +75,17 @@ const getTestConfig = () => {
       debugInfo.push(`auth_err=${authErr.message}`);
     }
     
-    // Set markers to make this visible in GUI
-    markers.set('credential-status', debugInfo.join('|'));
-    
   } catch (e) {
     debugInfo.push(`ERROR=${e.message}`);
-    markers.set('credential-error', e.message);
+    console.log(`CREDENTIAL ERROR: ${e.message}`);
   }
   
-  // Log for console too
+  // Log for console visibility
   console.log('=== CREDENTIAL DEBUG ===');
   console.log(debugInfo.join(' | '));
   console.log('=== END DEBUG ===');
+  
+  // Debug info is available in console logs and will be reconstructed in error messages
 
   // Configuration with secure credentials and sensible defaults
   return {
@@ -153,10 +152,10 @@ async function runTest() {
     baseDnInfo.push('STATUS=EMPTY_BASE_DN!');
     baseDnInfo.push('expected=ou=People,o=asml');
     baseDnInfo.push('issue=ldapBaseDN_not_read');
-    markers.set('basedn-status', 'FAILED: Empty base DN - credential not read');
+    console.log('❌ BASE DN STATUS: FAILED - Empty base DN, credential not read');
   } else {
     baseDnInfo.push(`STATUS=OK`);
-    markers.set('basedn-status', `OK: ${baseDN}`);
+    console.log(`✅ BASE DN STATUS: OK - Using ${baseDN}`);
     
     // Check compatibility
     if (bindDN && bindDN.includes(baseDN)) {
@@ -165,8 +164,6 @@ async function runTest() {
       baseDnInfo.push('compat=MAYBE');
     }
   }
-  
-  markers.set('basedn-debug', baseDnInfo.join('|'));
   
   console.log('=== BASE DN CHECK ===');
   console.log(baseDnInfo.join(' | '));
@@ -816,9 +813,9 @@ async function runTest() {
         
         // If this is a fallback search and we get 0xbe, provide specific guidance
         if (responseType === 0xbe) {
-          // Include credential debug info in error message for GUI visibility
-          const credentialInfo = markers.get('credential-status') || 'No credential info';
-          const baseDnInfo = markers.get('basedn-debug') || 'No base DN info';
+          // Reconstruct debug info for error message
+          const credentialInfo = `host=${host}|port=${port}|baseDN=${baseDN || 'NULL'}|user=${bindDN ? 'OK' : 'NULL'}`;
+          const baseDnInfo = `final_baseDN='${baseDN}'|bindDN='${bindDN}'|status=${baseDN === '' ? 'EMPTY' : 'OK'}`;
           
           const errorDetails = `🔍 LDAP Search Failed: Response type 0xbe (Invalid DN Syntax/Insufficient Access Rights)`;
           let debugSection = `\n\n📊 CREDENTIAL DEBUG: ${credentialInfo}`;
@@ -839,9 +836,9 @@ async function runTest() {
         
         // Handle specific response types with detailed explanations
         if (responseType === 0x01) {
-          // Include credential debug info in error message for GUI visibility
-          const credentialInfo = markers.get('credential-status') || 'No credential info';
-          const baseDnInfo = markers.get('basedn-debug') || 'No base DN info';
+          // Reconstruct debug info for error message
+          const credentialInfo = `host=${host}|port=${port}|baseDN=${baseDN || 'NULL'}|user=${bindDN ? 'OK' : 'NULL'}`;
+          const baseDnInfo = `final_baseDN='${baseDN}'|bindDN='${bindDN}'|status=${baseDN === '' ? 'EMPTY' : 'OK'}`;
           
           const errorDetails = `🔍 LDAP Search Failed: Response type 0x01 (Operations Error)`;
           let debugSection = `\n\n📊 CREDENTIAL DEBUG: ${credentialInfo}`;
