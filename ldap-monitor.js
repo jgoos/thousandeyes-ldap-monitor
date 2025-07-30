@@ -495,6 +495,43 @@ async function runTest() {
   };
 
   /**
+   * Parse BER length field starting at given position
+   * @param {any} buffer - The buffer to parse
+   * @param {number} pos - Position of length field
+   * @returns {object} {length: number, bytesUsed: number} or null if invalid
+   */
+  const parseBerLength = (buffer, pos) => {
+    try {
+      if (!buffer || pos >= buffer.length) return null;
+      
+      const firstByte = buffer[pos];
+      
+      if (firstByte <= 0x7F) {
+        // Short form: length is 0-127, encoded in 1 byte
+        return { length: firstByte, bytesUsed: 1 };
+      } else if (firstByte === 0x80) {
+        // Indefinite form: not allowed in SearchResultDone
+        return null;
+      } else {
+        // Long form: first byte is 0x81-0x84 indicating number of length octets
+        const lengthOctets = firstByte & 0x7F;
+        if (lengthOctets > 4 || pos + lengthOctets >= buffer.length) {
+          return null; // Too many octets or not enough bytes
+        }
+        
+        let length = 0;
+        for (let i = 1; i <= lengthOctets; i++) {
+          length = (length << 8) | buffer[pos + i];
+        }
+        
+        return { length: length, bytesUsed: 1 + lengthOctets };
+      }
+    } catch (error) {
+      return null;
+    }
+  };
+
+  /**
    * Intelligently find SearchResultDone (0x65) in proper LDAP message context
    * @param {any} response - The response buffer to search
    * @returns {number} Index of valid SearchResultDone or -1 if not found
@@ -510,22 +547,23 @@ async function runTest() {
           // Validate this is a real LDAP SearchResultDone, not ASCII text
           
           // Check if we have enough bytes after 0x65 for length + result code
-          if (i + 4 >= response.length) {
-            console.log(`Found 0x65 at position ${i} but insufficient bytes for LDAP message (need ${i + 4}, have ${response.length})`);
-            continue; // Not enough bytes for a complete LDAP message
+          if (i + 2 >= response.length) {
+            console.log(`Found 0x65 at position ${i} but insufficient bytes for LDAP message (need ${i + 2}, have ${response.length})`);
+            continue; // Not enough bytes for a minimal LDAP message
           }
           
-          // Check if the byte after 0x65 looks like a valid BER length
-          const lengthByte = response[i + 1];
-          
-          // BER length encoding: 
-          // - 0x00-0x7F = short form (0-127 bytes)
-          // - 0x81-0x84 = long form (1-4 length octets) for most practical cases
-          const isValidBerLength = (lengthByte <= 0x7F) || (lengthByte >= 0x81 && lengthByte <= 0x84);
-          
-          if (!isValidBerLength) {
-            console.log(`Found 0x65 at position ${i} but next byte 0x${lengthByte.toString(16)} is not valid BER length encoding`);
+          // Parse the BER length field properly
+          const lengthInfo = parseBerLength(response, i + 1);
+          if (!lengthInfo) {
+            console.log(`Found 0x65 at position ${i} but invalid BER length encoding`);
             continue; // Not a valid BER length, likely ASCII text
+          }
+          
+          // Check if we have enough bytes for the complete message
+          const resultCodePos = i + 1 + lengthInfo.bytesUsed;
+          if (resultCodePos >= response.length) {
+            console.log(`Found 0x65 at position ${i} but insufficient bytes for result code (need ${resultCodePos + 1}, have ${response.length})`);
+            continue; // Not enough bytes for result code
           }
           
           // Additional validation: check if this 0x65 is preceded by reasonable LDAP structure
@@ -544,6 +582,8 @@ async function runTest() {
           }
           
           console.log(`Found valid SearchResultDone (0x65) at position ${i} with proper LDAP context`);
+          console.log(`  BER length: ${lengthInfo.length} bytes (${lengthInfo.bytesUsed} octets used)`);
+          console.log(`  Result code position: ${resultCodePos}`);
           return i; // This looks like a real LDAP SearchResultDone
         }
       }
@@ -1199,17 +1239,25 @@ async function runTest() {
       // If we didn't find SearchResultDone, but we got SearchResultDone at position 8, handle it
       if (searchRsp.length > 8 && searchRsp[8] === 0x65) {
         console.log('SearchResultDone found at position 8 - likely immediate completion');
-        const resultCodePos = 12; // Typical position for result code in SearchResultDone
-        if (searchRsp.length > resultCodePos) {
-          const directResultCode = searchRsp[resultCodePos];
-          console.log(`Direct result code at position ${resultCodePos}: 0x${toHexSearch(directResultCode)} (${directResultCode})`);
-          if (directResultCode !== 0x00) {
-            const errorMsg = getLdapErrorMessage(directResultCode);
-            throw new Error(`Search failed: ${errorMsg}`);
+        
+        // Parse BER length to find correct result code position
+        const directLengthInfo = parseBerLength(searchRsp, 9);
+        if (directLengthInfo) {
+          const directResultCodePos = 9 + directLengthInfo.bytesUsed;
+          if (searchRsp.length > directResultCodePos) {
+            const directResultCode = searchRsp[directResultCodePos];
+            console.log(`Direct result code at position ${directResultCodePos}: 0x${toHexSearch(directResultCode)} (${directResultCode})`);
+            console.log(`  Direct SearchResultDone structure: tag=0x65 at 8, length=${directLengthInfo.length} (${directLengthInfo.bytesUsed} bytes), result=0x${toHexSearch(directResultCode)}`);
+            if (directResultCode !== 0x00) {
+              const errorMsg = getLdapErrorMessage(directResultCode);
+              throw new Error(`Search failed: ${errorMsg}`);
+            }
+            console.log('Search completed successfully with empty result set');
+          } else {
+            console.log(`Warning: Could not determine result code - need position ${directResultCodePos} but only have ${searchRsp.length} bytes`);
           }
-          console.log('Search completed successfully with empty result set');
         } else {
-          console.log('Warning: Could not determine result code from SearchResultDone');
+          console.log('Warning: Could not parse BER length in direct SearchResultDone');
         }
       } else {
         // Enhanced debugging for missing SearchResultDone
@@ -1264,15 +1312,24 @@ async function runTest() {
         throw new Error(`Search failed: No SearchResultDone message found\n\n${debugInfo.join('\n')}`);
       }
     } else {
-      if (doneIndex + 4 >= searchRspLength) {
+      // Parse BER length to determine minimum required bytes
+      const truncationLengthInfo = parseBerLength(searchRsp, doneIndex + 1);
+      const minRequiredPos = truncationLengthInfo ? (doneIndex + 1 + truncationLengthInfo.bytesUsed) : (doneIndex + 4);
+      
+      if (minRequiredPos >= searchRspLength) {
         // Enhanced debugging for truncated SearchResultDone
         const debugInfo = [];
         debugInfo.push(`TRUNCATED SEARCHRESULTDONE DEBUG:`);
         debugInfo.push(`- SearchResultDone found at index: ${doneIndex}`);
         debugInfo.push(`- Total response length: ${searchRspLength} bytes`);
-        debugInfo.push(`- Need to read result code at position: ${doneIndex + 4}`);
+        if (truncationLengthInfo) {
+          debugInfo.push(`- BER length: ${truncationLengthInfo.length} bytes (${truncationLengthInfo.bytesUsed} octets used)`);
+          debugInfo.push(`- Need to read result code at position: ${minRequiredPos}`);
+        } else {
+          debugInfo.push(`- Could not parse BER length, assuming position: ${minRequiredPos}`);
+        }
         debugInfo.push(`- Available bytes after SearchResultDone: ${searchRspLength - doneIndex}`);
-        debugInfo.push(`- Missing bytes: ${(doneIndex + 4) - searchRspLength + 1}`);
+        debugInfo.push(`- Missing bytes: ${minRequiredPos - searchRspLength + 1}`);
         
         // Show hex dump around the SearchResultDone position
         const start = Math.max(0, doneIndex - 5);
@@ -1292,8 +1349,20 @@ async function runTest() {
         
         throw new Error(`Search failed: SearchResultDone message truncated\n\n${debugInfo.join('\n')}`);
       }
-      const searchResultCode = searchRsp[doneIndex + 4];
-      console.log(`Search result code at position ${doneIndex + 4}: 0x${toHexSearch(searchResultCode)} (${searchResultCode})`);
+      // Parse BER length to find correct result code position
+      const resultLengthInfo = parseBerLength(searchRsp, doneIndex + 1);
+      if (!resultLengthInfo) {
+        throw new Error(`Search failed: Invalid BER length encoding in SearchResultDone at position ${doneIndex + 1}`);
+      }
+      
+      const resultCodePos = doneIndex + 1 + resultLengthInfo.bytesUsed;
+      if (resultCodePos >= searchRspLength) {
+        throw new Error(`Search failed: Result code position ${resultCodePos} exceeds response length ${searchRspLength}`);
+      }
+      
+      const searchResultCode = searchRsp[resultCodePos];
+      console.log(`Search result code at position ${resultCodePos}: 0x${toHexSearch(searchResultCode)} (${searchResultCode})`);
+      console.log(`  SearchResultDone structure: tag=0x65 at ${doneIndex}, length=${resultLengthInfo.length} (${resultLengthInfo.bytesUsed} bytes), result=0x${toHexSearch(searchResultCode)}`);
       if (searchResultCode !== 0x00) {
         const errorMsg = getLdapErrorMessage(searchResultCode);
         throw new Error(`Search failed: ${errorMsg}`);
