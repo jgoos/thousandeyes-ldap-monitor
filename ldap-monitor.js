@@ -629,10 +629,22 @@ async function runTest() {
           const contextLength = textCheckEnd - textCheckStart;
           const asciiRatio = asciiCount / contextLength;
           
-          // Reject if surrounded by too much ASCII text (>70% ASCII in context)
-          if (asciiRatio > 0.7 && textPatterns >= 2) {
-            console.log(`Found 0x65 at position ${i} but context is ${Math.round(asciiRatio*100)}% ASCII with ${textPatterns} text patterns - likely DN text`);
-            continue; // This is ASCII text like "People,o=asml", not LDAP protocol
+          // Check if this is pure ASCII text vs legitimate LDAP protocol data
+          // Only reject if it's clearly in the middle of ASCII text AND far from LDAP structure
+          let nearestSequence = 999;
+          for (let seq = 1; seq <= Math.min(20, i); seq++) {
+            if (response[i - seq] === 0x30) {
+              nearestSequence = seq;
+              break;
+            }
+          }
+          
+          const isInLdapStructure = nearestSequence <= 10; // Within 10 bytes of a SEQUENCE
+          
+          // Only reject ASCII if it's both >80% ASCII AND far from LDAP structure
+          if (asciiRatio > 0.8 && textPatterns >= 2 && !isInLdapStructure) {
+            console.log(`Found 0x65 at position ${i} but context is ${Math.round(asciiRatio*100)}% ASCII with ${textPatterns} text patterns and ${nearestSequence} bytes from SEQUENCE - likely pure text`);
+            continue; // This is pure ASCII text, not LDAP protocol data
           }
           
           // Additional validation: check if this 0x65 is preceded by reasonable LDAP structure
