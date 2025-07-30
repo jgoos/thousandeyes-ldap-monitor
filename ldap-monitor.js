@@ -8,17 +8,22 @@
  * Secure Credentials required:
  *   ldapMonUser  →  full bind DN   (e.g. "cn=monitor,ou=svc,dc=example,dc=com")
  *   ldapMonPass  →  password
+ *   ldapCaBase64 →  CA certificate(s) in base64-encoded format for LDAPS connections
+ *
+ * Optional Configuration Credentials (override defaults):
+ *   ldapHost     →  LDAP server hostname
+ *   ldapPort     →  LDAP server port (389 for LDAP, 636 for LDAPS)
+ *   ldapBaseDN   →  Base DN for search (empty = Root DSE)
  */
 
 import { net, credentials, test, markers } from 'thousandeyes';
 
 /**
- * Get configuration from ThousandEyes test variables with fallback defaults
- * This allows each test instance to monitor different LDAP servers
+ * Get configuration from secure credentials with fallback defaults
+ * Uses secure credentials for configuration since testVars are not available
  */
 const getTestConfig = () => {
-  // Get test settings and variables defensively for TypeScript compatibility
-  let testVars = {};
+  // Get test timeout defensively for TypeScript compatibility
   let testTimeout = null;
   
   if (test && 'getSettings' in test) {
@@ -28,7 +33,6 @@ const getTestConfig = () => {
         const settings = getSettingsMethod.call(test);
         if (settings) {
           testTimeout = settings.timeout;
-          testVars = settings.variables || {};
         }
       }
     } catch (e) {
@@ -36,23 +40,38 @@ const getTestConfig = () => {
     }
   }
 
-  // Configuration with ThousandEyes test variables (with sensible defaults)
+  // Try to get configuration from credentials (optional)
+  // These would be additional credentials beyond the auth credentials
+  let ldapHost = null;
+  let ldapPort = null;
+  let ldapBaseDN = null;
+  
+  try {
+    // Optional configuration credentials (if available)
+    ldapHost = credentials.get('ldapHost');
+    ldapPort = credentials.get('ldapPort');
+    ldapBaseDN = credentials.get('ldapBaseDN');
+  } catch (e) {
+    // Credentials may not exist, use defaults
+  }
+
+  // Configuration with secure credentials and sensible defaults
   return {
-    host: testVars.ldapHost || 'ldap.example.com',          // REQUIRED: Set in test variables
-    port: parseInt(testVars.ldapPort) || 636,               // 389 = LDAP, 636 = LDAPS
-    timeoutMs: parseInt(testVars.timeoutMs) || testTimeout || 5000, // socket timeout
-    slowMs: parseInt(testVars.slowMs) || 300,               // alert threshold in ms
-    baseDN: testVars.baseDN || '',                          // '' = Root DSE (fastest search)
-    filterAttr: testVars.filterAttr || 'objectClass',      // attribute for present filter
-    retryDelayMs: parseInt(testVars.retryDelayMs) || 100,   // delay between retries
-    maxRetries: parseInt(testVars.maxRetries) || 2,         // max retry attempts
-    tlsMinVersion: testVars.tlsMinVersion || 'TLSv1.2',     // minimum TLS version
-    serverName: testVars.serverName || testVars.ldapHost || 'LDAP Server' // For identification
+    host: ldapHost || 'ldap.example.com',                   // Override via ldapHost credential
+    port: parseInt(ldapPort) || 636,                        // Override via ldapPort credential (389 = LDAP, 636 = LDAPS)
+    timeoutMs: testTimeout || 5000,                         // socket timeout from test settings
+    slowMs: 300,                                            // alert threshold in ms
+    baseDN: ldapBaseDN || '',                               // Override via ldapBaseDN credential ('' = Root DSE)
+    filterAttr: 'objectClass',                              // attribute for present filter
+    retryDelayMs: 100,                                      // delay between retries
+    maxRetries: 2,                                          // max retry attempts
+    tlsMinVersion: 'TLSv1.2',                               // minimum TLS version
+    serverName: ldapHost || 'LDAP Server'                   // For identification
   };
 };
 
 async function runTest() {
-  // Get dynamic configuration from test variables
+  // Get configuration from credentials and defaults
   const cfg = getTestConfig();
 
   /* ─────────── dynamic configuration loaded ─────────── */
@@ -78,6 +97,17 @@ async function runTest() {
   /* Secure secrets        (Settings ▸ Secure Credentials) */
   const bindDN  = credentials.get('ldapMonUser');
   const bindPwd = credentials.get('ldapMonPass');
+  const caBase64 = credentials.get('ldapCaBase64');
+  
+  // Debug certificate information
+  if (port === 636) {
+    if (caBase64) {
+      console.log(`Base64-encoded CA certificate provided - length: ${caBase64.length} characters`);
+      console.log(`Base64 data starts with: ${caBase64.substring(0, 40)}...`);
+    } else {
+      console.log('No CA certificate provided - will use system certificates');
+    }
+  }
 
   /* Input validation */
   if (!bindDN || !bindPwd) {
@@ -320,13 +350,65 @@ async function runTest() {
       metrics.connectionStart = Date.now();
       markers.start(connectMarkerName);
       connectMarkerStarted = true;
-      const connectPromise = (port === 636)
-          ? net.connectTls(port, host, {
-              minVersion: tlsMinVersion,
-              rejectUnauthorized: true,
-              servername: host
-            })
-          : net.connect(port, host);
+      
+      if (port === 636) {
+        console.log(`Establishing LDAPS connection with ${caBase64 ? 'custom CA certificate' : 'system CA certificates'}`);
+      }
+      
+      let connectPromise;
+      if (port === 636) {
+        const tlsOptions = {
+          minVersion: tlsMinVersion,
+          rejectUnauthorized: true,
+          servername: host
+        };
+        
+        // Add CA certificate if provided
+        if (caBase64) {
+          try {
+            // Decode base64 to PEM format
+            console.log('Decoding base64 CA certificate...');
+            const pemCertificate = Buffer.from(caBase64.trim(), 'base64').toString('utf8');
+            console.log(`Decoded certificate length: ${pemCertificate.length} characters`);
+            
+            // Normalize line endings and validate PEM format
+            const normalizedPem = pemCertificate.replace(/\r\n/g, '\n').trim();
+            
+            if (!normalizedPem.includes('-----BEGIN CERTIFICATE-----')) {
+              throw new Error('Decoded certificate is not in valid PEM format (missing -----BEGIN CERTIFICATE-----)');
+            }
+            
+            // Extract all certificates from the PEM data (handles certificate chains)
+            const certRegex = /-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICATE-----/g;
+            const certificates = normalizedPem.match(certRegex);
+            
+            if (!certificates || certificates.length === 0) {
+              throw new Error('No valid certificates found in decoded PEM data');
+            }
+            
+            console.log(`Found ${certificates.length} certificate(s) in decoded data`);
+            
+            // Convert each certificate to Buffer
+            const caBuffers = certificates.map((cert, index) => {
+              const trimmedCert = cert.trim();
+              console.log(`Certificate ${index + 1}: ${trimmedCert.length} chars`);
+              return Buffer.from(trimmedCert, 'utf8');
+            });
+            
+            tlsOptions.ca = caBuffers;
+            console.log(`Using ${caBuffers.length} custom CA certificate(s) for LDAPS connection`);
+            
+          } catch (caError) {
+            throw new Error(`CA certificate processing failed: ${caError.message}`);
+          }
+        } else {
+          console.log('Warning: Using system CA certificates - may fail with self-signed certificates');
+        }
+        
+        connectPromise = net.connectTls(port, host, tlsOptions);
+      } else {
+        connectPromise = net.connect(port, host);
+      }
 
       // Create connection with timeout
       const socketResult = await connectPromise;
@@ -356,11 +438,27 @@ async function runTest() {
         markers.stop(connectMarkerName);
       }
       markers.stop(`retry-${attempt}`);
+      
+      // Enhanced error logging for certificate issues
+      const errorMsg = err && err.message || 'Unknown error';
+      if (errorMsg.includes('certificate') || errorMsg.includes('CERT_') || errorMsg.includes('SSL') || errorMsg.includes('TLS')) {
+        console.log(`Certificate/TLS error on attempt ${attempt + 1}: ${errorMsg}`);
+        if (!caBase64 && port === 636) {
+          console.log('Hint: Consider providing ldapCaBase64 credential for self-signed certificates');
+        }
+      } else {
+        console.log(`Connection attempt ${attempt + 1} failed: ${errorMsg}`);
+      }
+      
       attempt++;
       if (attempt > maxRetries) {
-        throw new Error(`Connection failed after ${maxRetries + 1} attempts: ${err && err.message || 'Unknown error'}`);
+        // Provide more specific error message for certificate issues
+        if (errorMsg.includes('certificate') || errorMsg.includes('CERT_') || errorMsg.includes('SSL') || errorMsg.includes('TLS')) {
+          throw new Error(`TLS/Certificate validation failed after ${maxRetries + 1} attempts: ${errorMsg}. ${!caBase64 && port === 636 ? 'Consider providing ldapCaBase64 credential (base64-encoded) for self-signed certificates.' : ''}`);
+        }
+        throw new Error(`Connection failed after ${maxRetries + 1} attempts: ${errorMsg}`);
       }
-      console.log(`Connection attempt ${attempt} failed, retrying...`);
+      
       // Use defensive delay mechanism
       await createDelay(retryDelayMs);
     }
