@@ -1441,8 +1441,26 @@ async function runTest() {
         console.log(`  This suggests we may be reading ASCII text instead of LDAP protocol data.`);
       }
       if (searchResultCode !== 0x00) {
+        // Include hex dump directly in error message for visibility
+        const hexDumpLines = [];
+        hexDumpLines.push(`\nBYTE-LEVEL DEBUG (SearchResultDone parsing):`);
+        hexDumpLines.push(`doneIndex: ${doneIndex}, BER length: ${resultLengthInfo.length} (${resultLengthInfo.bytesUsed} bytes), resultCodePos: ${resultCodePos}`);
+        hexDumpLines.push(`Response length: ${searchRspLength}, Hex dump around result position:`);
+        
+        const debugStart = Math.max(0, doneIndex - 5);
+        const debugEnd = Math.min(searchRspLength, resultCodePos + 10);
+        for (let i = debugStart; i < debugEnd; i++) {
+          const byte = searchRsp[i];
+          const ascii = (byte >= 32 && byte <= 126) ? String.fromCharCode(byte) : '.';
+          let marker = '';
+          if (i === doneIndex) marker = ' <-- SearchResultDone';
+          else if (i === doneIndex + 1) marker = ' <-- BER length';
+          else if (i === resultCodePos) marker = ' <-- Result code';
+          hexDumpLines.push(`[${i}] = 0x${toHexSearch(byte)} (${byte}) '${ascii}'${marker}`);
+        }
+        
         const errorMsg = getLdapErrorMessage(searchResultCode);
-        throw new Error(`Search failed: ${errorMsg}`);
+        throw new Error(`Search failed: ${errorMsg}${hexDumpLines.join('\n')}`);
       }
       console.log('Search completed successfully');
     }
