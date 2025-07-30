@@ -634,17 +634,17 @@ async function runTest() {
     
 
     /* 3 ▸ flexible search  (messageID = 2) */
-    // Use base scope (0) for specific DN, subtree scope (2) for organizational searches
-    // Base scope searches the exact DN object, subtree searches beneath it
-    const searchScope = baseDN === '' ? 0 : 0; // Use base scope - searches only the exact DN object
+    // Use subtree scope (2) for organizational DN searches, base scope (0) for Root DSE
+    // Subtree scope searches beneath the DN, which works for organizational units
+    const searchScope = baseDN === '' ? 0 : 2; // Subtree scope for specific DNs like ou=People
     console.log(`Using search scope: ${searchScope} (0=base, 1=one-level, 2=subtree)`);
     console.log(`Search filter: (${filterAttr}=*) - checking for presence of ${filterAttr} attribute`);
     console.log(`Note: Using uid filter instead of objectClass to avoid potential access restrictions`);
-    console.log(`Search target: base DN '${baseDN}' with base scope (0) - searching only the exact DN object`);
+    console.log(`Search target: base DN '${baseDN}' with ${searchScope === 0 ? 'base scope (0) - searching only the exact DN object' : 'subtree scope (2) - searching beneath the DN'}`);
     
     // For debugging: log what we expect to find
-    if (baseDN.includes('ou=People')) {
-      console.log(`Warning: Base scope search on organizational unit may not work. Consider removing 'ou=People' part or using your exact bind DN.`);
+    if (baseDN.includes('ou=People') && searchScope === 2) {
+      console.log(`Info: Subtree scope search on organizational unit should find user objects beneath it.`);
     }
     
     const searchReqBody = Buffer.concat([
@@ -791,7 +791,7 @@ async function runTest() {
           } else {
             suggestion = ` Consider using your exact bind DN or a different base DN structure.`;
           }
-          throw new Error(`Search failed: Response type 0x01 indicates an LDAP Operations Error. The base DN '${baseDN}' exists but the search operation failed - likely because an organizational unit doesn't have 'uid' attributes.${suggestion}`);
+          throw new Error(`Search failed: Response type 0x01 indicates an LDAP Operations Error. The search operation on '${baseDN}' failed.${suggestion}`);
         } else if (responseType === 0x78) {
           throw new Error(`Search failed: Response type 0x78 indicates an Extended Response. This may be an unsupported operation or protocol mismatch.`);
         } else {
