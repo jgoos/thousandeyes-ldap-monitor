@@ -98,14 +98,20 @@ async function runTest() {
   const bindDN  = credentials.get('ldapMonUser');
   const bindPwd = credentials.get('ldapMonPass');
   const caPem   = credentials.get('ldapCaPem');
+  
+  // Debug certificate information
+  if (port === 636) {
+    if (caPem) {
+      console.log(`CA certificate provided - length: ${caPem.length} characters`);
+      console.log(`CA certificate starts with: ${caPem.substring(0, 27)}...`);
+    } else {
+      console.log('No CA certificate provided - will use system certificates');
+    }
+  }
 
   /* Input validation */
   if (!bindDN || !bindPwd) {
     throw new Error('Missing credentials: Ensure ldapMonUser and ldapMonPass are configured');
-  }
-
-  if (port === 636 && !caPem) {
-    console.log('Warning: No custom CA certificate provided for LDAPS connection, using system CA certificates');
   }
 
   if (port !== 389 && port !== 636) {
@@ -349,14 +355,35 @@ async function runTest() {
         console.log(`Establishing LDAPS connection with ${caPem ? 'custom CA certificate' : 'system CA certificates'}`);
       }
       
-      const connectPromise = (port === 636)
-          ? net.connectTls(port, host, {
-              minVersion: tlsMinVersion,
-              rejectUnauthorized: true,
-              servername: host,
-              ...(caPem && { ca: [Buffer.from(caPem, 'utf8')] })
-            })
-          : net.connect(port, host);
+      let connectPromise;
+      if (port === 636) {
+        const tlsOptions = {
+          minVersion: tlsMinVersion,
+          rejectUnauthorized: true,
+          servername: host
+        };
+        
+        // Add CA certificate if provided
+        if (caPem) {
+          try {
+            // Ensure the CA certificate is properly formatted
+            const caCert = caPem.trim();
+            if (!caCert.includes('-----BEGIN CERTIFICATE-----')) {
+              throw new Error('CA certificate must be in PEM format (missing -----BEGIN CERTIFICATE-----)');
+            }
+            tlsOptions.ca = [Buffer.from(caCert, 'utf8')];
+            console.log('Using custom CA certificate for LDAPS connection');
+          } catch (caError) {
+            throw new Error(`Invalid CA certificate format: ${caError.message}`);
+          }
+        } else {
+          console.log('Warning: Using system CA certificates - may fail with self-signed certificates');
+        }
+        
+        connectPromise = net.connectTls(port, host, tlsOptions);
+      } else {
+        connectPromise = net.connect(port, host);
+      }
 
       // Create connection with timeout
       const socketResult = await connectPromise;
@@ -386,11 +413,27 @@ async function runTest() {
         markers.stop(connectMarkerName);
       }
       markers.stop(`retry-${attempt}`);
+      
+      // Enhanced error logging for certificate issues
+      const errorMsg = err && err.message || 'Unknown error';
+      if (errorMsg.includes('certificate') || errorMsg.includes('CERT_') || errorMsg.includes('SSL') || errorMsg.includes('TLS')) {
+        console.log(`Certificate/TLS error on attempt ${attempt + 1}: ${errorMsg}`);
+        if (!caPem && port === 636) {
+          console.log('Hint: Consider providing ldapCaPem credential for self-signed certificates');
+        }
+      } else {
+        console.log(`Connection attempt ${attempt + 1} failed: ${errorMsg}`);
+      }
+      
       attempt++;
       if (attempt > maxRetries) {
-        throw new Error(`Connection failed after ${maxRetries + 1} attempts: ${err && err.message || 'Unknown error'}`);
+        // Provide more specific error message for certificate issues
+        if (errorMsg.includes('certificate') || errorMsg.includes('CERT_') || errorMsg.includes('SSL') || errorMsg.includes('TLS')) {
+          throw new Error(`TLS/Certificate validation failed after ${maxRetries + 1} attempts: ${errorMsg}. ${!caPem && port === 636 ? 'Consider providing ldapCaPem credential for self-signed certificates.' : ''}`);
+        }
+        throw new Error(`Connection failed after ${maxRetries + 1} attempts: ${errorMsg}`);
       }
-      console.log(`Connection attempt ${attempt} failed, retrying...`);
+      
       // Use defensive delay mechanism
       await createDelay(retryDelayMs);
     }
