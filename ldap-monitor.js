@@ -62,6 +62,7 @@ const getTestConfig = () => {
     timeoutMs: testTimeout || 5000,                         // socket timeout from test settings
     slowMs: 300,                                            // alert threshold in ms
     baseDN: ldapBaseDN || '',                               // Override via ldapBaseDN credential ('' = Root DSE - may not work on all servers)
+    fallbackSearch: !ldapBaseDN,                            // Use fallback search strategy if no base DN provided
     filterAttr: 'objectClass',                              // attribute for present filter
     retryDelayMs: 100,                                      // delay between retries
     maxRetries: 2,                                          // max retry attempts
@@ -85,7 +86,8 @@ async function runTest() {
     retryDelayMs,
     maxRetries,
     tlsMinVersion,
-    serverName
+    serverName,
+    fallbackSearch
   } = cfg;
   
   // Log which server we're testing for clarity
@@ -741,6 +743,16 @@ async function runTest() {
         }
         console.log(`Found LDAP response types: ${responseTypes.length > 0 ? responseTypes.join(', ') : 'none'}`);
         const baseDnHint = baseDN === '' ? ' Consider setting ldapBaseDN credential with a valid base DN (e.g., dc=company,dc=com) instead of using Root DSE.' : '';
+        
+        // If this is a fallback search and we get 0xbe, provide specific guidance
+        if (responseType === 0xbe) {
+          const errorDetails = `Search failed: Response type 0xbe typically indicates "Invalid DN Syntax" or "Insufficient Access Rights".`;
+          const solution = baseDN === '' ? 
+            ' Solution: Add ldapBaseDN credential with your LDAP server\'s base DN (e.g., dc=company,dc=com, ou=users,dc=example,dc=org).' :
+            ' Check if the provided base DN is correct for your LDAP server.';
+          throw new Error(`${errorDetails}${solution}`);
+        }
+        
         throw new Error(`Search failed: Unexpected response type 0x${toHexSearch(responseType)} at position 8. Expected 0x64 (SearchResultEntry) or 0x65 (SearchResultDone).${baseDnHint}`);
       }
     }
