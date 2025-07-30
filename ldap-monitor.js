@@ -45,20 +45,41 @@ const getTestConfig = () => {
   let ldapPort = null;
   let ldapBaseDN = null;
   
+  console.log('=== DETAILED CREDENTIAL DEBUG ===');
+  console.log('Checking credentials object availability...');
+  console.log(`credentials object exists: ${typeof credentials}`);
+  console.log(`credentials.get function exists: ${typeof credentials.get}`);
+  
   try {
+    // Test each credential individually
+    console.log('Testing ldapHost...');
     ldapHost = credentials.get('ldapHost');
-    ldapPort = credentials.get('ldapPort');
-    ldapBaseDN = credentials.get('ldapBaseDN');
+    console.log(`ldapHost result: ${ldapHost ? `'${ldapHost}'` : 'null/undefined'} (type: ${typeof ldapHost})`);
     
-    console.log('=== getTestConfig Credential Debug ===');
-    console.log(`ldapHost: ${ldapHost || 'null'}`);
-    console.log(`ldapPort: ${ldapPort || 'null'}`);
-    console.log(`ldapBaseDN: ${ldapBaseDN || 'null'}`);
-    console.log('=== End getTestConfig Debug ===');
+    console.log('Testing ldapPort...');
+    ldapPort = credentials.get('ldapPort');
+    console.log(`ldapPort result: ${ldapPort ? `'${ldapPort}'` : 'null/undefined'} (type: ${typeof ldapPort})`);
+    
+    console.log('Testing ldapBaseDN...');
+    ldapBaseDN = credentials.get('ldapBaseDN');
+    console.log(`ldapBaseDN result: ${ldapBaseDN ? `'${ldapBaseDN}'` : 'null/undefined'} (type: ${typeof ldapBaseDN})`);
+    
+    // Test the auth credentials to see if those work
+    console.log('Testing auth credentials for comparison...');
+    try {
+      const testUser = credentials.get('ldapMonUser');
+      const testPass = credentials.get('ldapMonPass');
+      console.log(`ldapMonUser works: ${testUser ? 'YES' : 'NO'}`);
+      console.log(`ldapMonPass works: ${testPass ? 'YES' : 'NO'}`);
+    } catch (authErr) {
+      console.log(`Auth credential test failed: ${authErr.message}`);
+    }
     
   } catch (e) {
     console.log(`ERROR in getTestConfig reading credentials: ${e.message}`);
+    console.log(`Error stack: ${e.stack}`);
   }
+  console.log('=== END DETAILED DEBUG ===');
 
   // Configuration with secure credentials and sensible defaults
   return {
@@ -116,12 +137,18 @@ async function runTest() {
     }
   }
   
-  // Warn about potential base DN issues
+  // Enhanced base DN debugging
+  console.log('=== BASE DN FINAL CHECK ===');
+  console.log(`Final baseDN value: '${baseDN}' (length: ${baseDN.length})`);
+  console.log(`Final bindDN value: '${bindDN}'`);
+  
   if (baseDN === '') {
-    console.log('Warning: Using empty base DN (Root DSE search). Some LDAP servers may not support this.');
-    console.log('Consider setting ldapBaseDN credential with a proper base DN (e.g., dc=company,dc=com)');
+    console.log('❌ WARNING: Using empty base DN (Root DSE search)');
+    console.log('This means ldapBaseDN credential was not read successfully!');
+    console.log('Expected: ou=People,o=asml');
+    console.log('Check the credential debugging above for the root cause.');
   } else {
-    console.log(`Using base DN: '${baseDN}'`);
+    console.log(`✅ Using base DN: '${baseDN}'`);
     console.log(`Bind DN: '${bindDN}' (for comparison)`);
     
     // Check if base DN and bind DN are compatible
@@ -132,6 +159,7 @@ async function runTest() {
       console.log('Consider using a base DN that encompasses your bind DN hierarchy');
     }
   }
+  console.log('=== END BASE DN CHECK ===');
 
   /* Input validation */
   if (!bindDN || !bindPwd) {
