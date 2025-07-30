@@ -1,18 +1,29 @@
-# thousandeyes-ldap-monitor
+# ThousandEyes LDAP Health Monitoring Script
 
-Self-contained ThousandEyes script that performs an LDAP/LDAPS bind + search and alerts on latency.
+Comprehensive LDAPS monitoring for ThousandEyes Enterprise Agents with advanced search capabilities and robust error handling.
 
 > **Important:** ThousandEyes Transaction tests only support a single JavaScript file. While this repository contains multiple files for documentation and examples, only `ldap-monitor.js` should be copied into the ThousandEyes platform.
 
 ## Overview
 
-This repository contains a JavaScript monitoring script designed for ThousandEyes that:
+This repository contains an enterprise-grade JavaScript monitoring script for ThousandEyes that provides:
 
-- Performs authenticated LDAPv3 simple bind operations
-- Executes fast base-scope searches against Root DSE
-- Measures and reports round-trip times for both operations
-- Alerts when operations exceed configurable thresholds (default: 300ms)
-- Supports both LDAP (port 389) and LDAPS (port 636) with TLS 1.2/1.3
+### **Core Features**
+- **Direct LDAPS Monitoring**: No proxy required, connects directly to LDAP servers
+- **LDAPv3 Simple Bind**: Comprehensive authentication with detailed error analysis
+- **Flexible Search Operations**: Configurable filters, attributes, and search scopes
+- **Custom CA Certificate Support**: Self-signed certificate compatibility for LDAPS
+- **Intelligent Error Handling**: 24 comprehensive LDAP result codes with solutions
+- **Performance Monitoring**: Sub-300ms response time monitoring with detailed metrics
+- **Bind-Only Mode**: Authentication verification without search operations
+
+### **Enhanced Capabilities**
+- **Custom Search Filters**: Support for presence, equality, and complex LDAP filters
+- **Attribute Retrieval**: Specify which LDAP attributes to return
+- **Multiple Server Types**: Optimized for Active Directory, OpenLDAP, and RFC-compliant servers
+- **Retry Logic**: Intelligent connection retry with exponential backoff
+- **SearchResultDone Detection**: Advanced algorithm with ASCII text filtering
+- **Comprehensive Logging**: Essential troubleshooting information without debug pollution
 
 ## Repository Structure
 
@@ -26,29 +37,69 @@ While ThousandEyes only supports single-file scripts, this repository includes a
 
 The example configuration file shows different settings for various LDAP implementations (Active Directory, OpenLDAP, etc.) that you can reference when modifying the settings in the main script.
 
-## Setup Instructions
+## Quick Start Guide
 
-Follow these steps to configure LDAP monitoring in ThousandEyes:
+### Prerequisites
+- ThousandEyes Enterprise Agents with network access to LDAP server
+- LDAP service account with read permissions
+- CA certificate for LDAPS (if using self-signed certificates)
 
-### 1. Store Credentials Securely
+### 1. Configure Secure Credentials
 
 **Navigation:** `Settings ▸ Secure Credentials ▸ Add Credential`
 
-Create two secure credential entries:
+#### **Required Credentials**
 
-**First Credential:**
+**LDAP Authentication:**
 - **Name:** `ldapMonUser`
-- **Value:** Paste the full bind DN (e.g., `cn=monitor,ou=svc,dc=example,dc=com`)
-- **Agent Access:** Tick the Enterprise (and/or Cloud) Agents that will run the test
+- **Value:** Full bind DN (e.g., `cn=monitor,ou=svc,dc=example,dc=com`)
+- **Agent Access:** Select Enterprise Agents that will run the test
 
-**Second Credential:**
-- **Name:** `ldapMonPass`
-- **Value:** Paste the account's password
-- **Agent Access:** Tick the same agents selected for ldapMonUser
+**Password:**
+- **Name:** `ldapMonPass`  
+- **Value:** Authentication password
+- **Agent Access:** Select the same agents as ldapMonUser
 
-> **Security Note:** Secure Credential entries are encrypted at rest and never appear in screenshots, reports, or API payloads.
+**LDAP Server:**
+- **Name:** `ldapHost`
+- **Value:** LDAP server hostname or IP (e.g., `ldap.example.com`)
+- **Agent Access:** Select the same agents
 
-### 2. Create a New Test
+#### **Optional Credentials**
+
+**LDAPS Certificate (recommended for self-signed certificates):**
+- **Name:** `ldapCaBase64`
+- **Value:** Base64-encoded CA certificate(s) in PEM format
+- **Agent Access:** Select the same agents
+
+**Server Port:**
+- **Name:** `ldapPort`
+- **Value:** `389` (LDAP) or `636` (LDAPS, default)
+- **Agent Access:** Select the same agents
+
+**Search Configuration:**
+- **Name:** `ldapBaseDN`
+- **Value:** Search base DN (e.g., `ou=People,dc=example,dc=com`) or `USE_BIND_DN` for auto-detection
+- **Agent Access:** Select the same agents
+
+**Custom Search Filter:**
+- **Name:** `ldapFilter`
+- **Value:** LDAP filter (e.g., `(cn=*)`, `(objectClass=*)`, `(sAMAccountName=*)`)
+- **Agent Access:** Select the same agents
+
+**Attribute Retrieval:**
+- **Name:** `ldapAttrs`
+- **Value:** Comma-separated attributes (e.g., `cn,mail,uid`)
+- **Agent Access:** Select the same agents
+
+**Bind-Only Mode:**
+- **Name:** `ldapBindOnly`
+- **Value:** `true` to skip search and only verify authentication
+- **Agent Access:** Select the same agents
+
+> **Security Note:** All credentials are encrypted at rest and never appear in screenshots, reports, or API payloads.
+
+### 2. Create Transaction Test
 
 **Navigation:** `Test Settings → Add New Test` (top-right)
 
@@ -61,74 +112,156 @@ In the Steps panel:
 1. Click `Script` (looks like `{ }`)
 2. Delete the stub Selenium code
 3. Copy the **entire contents** of `ldap-monitor.js` and paste it into the editor
-   - Note: Only use the main script file - ThousandEyes doesn't support multiple files or imports
+   - **Important:** Only use the main script file - ThousandEyes doesn't support multiple files or imports
 
 ### 4. Configure Credential Access
 
 In the Script editor:
-1. Click the key icon above the editor
-2. Tick `ldapMonUser` and `ldapMonPass` to allow `credentials.get()` to access them at runtime
-3. No plaintext credentials will ever appear in the script
+1. Click the key icon (🔐) above the editor
+2. Enable access to your required credentials:
+   - **Always required:** `ldapMonUser`, `ldapMonPass`, `ldapHost`
+   - **Optional:** `ldapCaBase64`, `ldapPort`, `ldapBaseDN`, `ldapFilter`, `ldapAttrs`, `ldapBindOnly`
+3. The script automatically reads these credentials at runtime
+4. No plaintext credentials will ever appear in the script
 
 ### 5. Select Agents and Monitoring Frequency
 
 **Agents dropdown** (just below the script):
-- Select Enterprise Agent(s) that sit next to the LDAP server
-- Optionally add Cloud Agents for outside-in checks
-- Leave Interval at 1 minute unless lighter sampling is needed
+- Select Enterprise Agent(s) with network access to your LDAP server
+- Consider geographic proximity for accurate latency measurements
+- Optionally add Cloud Agents for external monitoring perspective
+- **Recommended Interval:** 1 minute for real-time monitoring
 
 ### 6. Configure Alerting
 
 **Navigation:** `Alerts → Enable`
 
-Options:
-- Re-use an existing Transaction alert rule, or
-- Create a new rule that triggers on `Test status = Fail` for 3 consecutive rounds
+**Recommended Alert Configuration:**
+- **Alert Rule:** Create new rule or reuse existing Transaction alert
+- **Trigger Condition:** `Test status = Fail` for 2-3 consecutive rounds
+- **Performance Threshold:** Consider separate alerts for response time thresholds
 
-### 7. Test the Configuration
+### 7. Validate Configuration
 
-**Validation:**
-1. Click `Validate` in Instant Test (right side)
-2. The platform runs the script once
-3. Check Console output for bind + search RTT
-4. No errors = successful configuration
+**Pre-deployment Testing:**
+1. Click `Validate` in Instant Test (right side of the screen)
+2. Review console output for:
+   - `Testing LDAP server: [hostname]:[port]`
+   - `Bind RTT: X ms`
+   - `Search RTT: X ms` (if not using bind-only mode)
+   - `Total operation time: X ms`
+3. No error messages = successful configuration
 
-### 8. Save and Deploy
+### 8. Deploy and Monitor
 
-Click `Create New Test` - data starts flowing immediately.
+1. Click `Create New Test` to activate monitoring
+2. Data collection begins immediately
+3. Access results via `Test Views → Transaction`
 
-## Script Configuration
+## Configuration Examples
 
-The script includes user-tunable settings at the top:
+The script reads all configuration from ThousandEyes Secure Credentials. Here are common configuration patterns:
 
-```javascript
-const host      = 'ldap.example.com';  // FQDN or IP
-const port      = 636;                 // 389 = LDAP, 636 = LDAPS
-const cfg = {
-  host: 'ldap.example.com',
-  port: 636,
-  timeoutMs: 5000,
-  slowMs: 300,
-  baseDN: '',
-  filterAttr: 'objectClass',
-  retryDelayMs: 100,
-  maxRetries: 2,
-  tlsMinVersion: 'TLSv1.2'
-};
+### **Basic LDAPS Monitoring**
+```
+Required Credentials:
+ldapHost     = "ldap.example.com"
+ldapMonUser  = "cn=monitor,ou=svc,dc=example,dc=com"  
+ldapMonPass  = "your-secure-password"
 ```
 
-Modify these values according to your LDAP server configuration before deploying.
+### **Active Directory Integration**
+```
+Required Credentials:
+ldapHost     = "dc01.corp.example.com"
+ldapMonUser  = "cn=ldap-monitor,ou=Service Accounts,dc=corp,dc=example,dc=com"
+ldapMonPass  = "your-ad-password"
+
+Optional Enhancements:
+ldapBaseDN   = "dc=corp,dc=example,dc=com"
+ldapFilter   = "(sAMAccountName=*)"
+ldapAttrs    = "sAMAccountName,displayName,mail"
+```
+
+### **OpenLDAP with Custom Search**
+```
+Required Credentials:
+ldapHost     = "ldap.openldap.org"
+ldapMonUser  = "cn=monitor,dc=openldap,dc=org"
+ldapMonPass  = "monitor-password"
+
+Optional Enhancements:
+ldapBaseDN   = "ou=People,dc=openldap,dc=org"
+ldapFilter   = "(uid=*)"
+ldapAttrs    = "uid,cn,mail,telephoneNumber"
+```
+
+### **Bind-Only Authentication Check**
+```
+Required Credentials:
+ldapHost     = "auth.example.com"
+ldapMonUser  = "cn=auth-check,ou=monitoring,dc=example,dc=com"
+ldapMonPass  = "auth-password"
+
+Performance Optimization:
+ldapBindOnly = "true"    # Skip search, only verify authentication
+```
+
+### **Self-Signed Certificate Support**
+```
+Required Credentials:
+ldapHost     = "internal-ldap.company.local"
+ldapMonUser  = "cn=monitor,dc=company,dc=local"
+ldapMonPass  = "internal-password"
+
+LDAPS Configuration:
+ldapCaBase64 = "LS0tLS1CRUdJTi..."  # Base64-encoded CA certificate
+ldapPort     = "636"                 # Explicit LDAPS port
+```
 
 ## Monitoring Output
 
-The script provides console output showing:
-- `Bind RTT: X ms` - Time taken for authentication
-- `Search RTT: X ms` - Time taken for directory search
+### **Successful Operation Console Output**
+```
+Testing LDAP server: dc01.corp.example.com (dc01.corp.example.com:636)
+Connection established in 45 ms
+Sending LDAP bind request (67 bytes) for user: cn=monitor,ou=svc,dc=corp,dc=example,dc=com
+Bind RTT: 125 ms
+Using search scope: 2 (0=base, 1=one-level, 2=subtree)
+Search mode: Manual/organizational search
+Search filter: (sAMAccountName=*)
+Requesting attributes: sAMAccountName,displayName,mail
+Sending LDAP search request (89 bytes) - baseDN: 'dc=corp,dc=example,dc=com', filter: '(sAMAccountName=*)'
+Search RTT: 78 ms
+Search completed successfully
+Total operation time: 248 ms
+Performance breakdown:
+  - Connection: 45 ms
+  - Bind: 125 ms
+  - Search: 78 ms
+```
 
-The script will throw errors (causing test failure) if:
-- Bind fails due to bad credentials or connectivity issues
-- Search fails due to unexpected LDAP responses
-- Either operation exceeds the configured `slowMs` threshold
+### **Bind-Only Mode Output**
+```
+Testing LDAP server: auth.example.com (auth.example.com:636)
+Connection established in 32 ms
+Bind RTT: 89 ms
+BIND-ONLY MODE: Skipping search operation as requested
+LDAP authentication verified successfully - monitoring complete
+Total operation time: 121 ms
+Performance breakdown (bind-only mode):
+  - Connection: 32 ms
+  - Bind: 89 ms
+  - Search: skipped (bind-only mode)
+```
+
+### **Error Conditions**
+The script will throw errors (causing test failure) for:
+- **Authentication Failures**: Invalid credentials, account lockout, insufficient permissions
+- **Connection Issues**: Network timeouts, certificate validation failures, port accessibility
+- **Search Failures**: Invalid base DN, malformed filters, server-side search restrictions
+- **Performance Thresholds**: Operations exceeding 300ms default threshold
+- **Protocol Errors**: Malformed LDAP responses, unsupported operations
 
 ## Requirements
 
@@ -136,151 +269,355 @@ The script will throw errors (causing test failure) if:
 - LDAP server with monitoring account credentials
 - Network connectivity from agents to LDAP server on configured port
 
-## Troubleshooting
+## Troubleshooting Guide
 
-### Common Error Messages and Solutions
+### **Configuration Issues**
+
+#### "Missing LDAP host: Ensure ldapHost credential is configured"
+**Cause:** The required `ldapHost` credential is missing or not accessible.
+
+**Solution:**
+1. Create `ldapHost` credential in `Settings ▸ Secure Credentials`
+2. Set value to your LDAP server hostname or IP address
+3. Ensure the agent running the test has access to this credential
+4. Verify credential name is exactly `ldapHost` (case-sensitive)
 
 #### "Missing credentials: Ensure ldapMonUser and ldapMonPass are configured"
-**Cause:** The secure credentials are not properly configured or not accessible to the agent.
+**Cause:** Required authentication credentials are missing or inaccessible.
 
 **Solution:**
-1. Verify credentials exist in `Settings ▸ Secure Credentials`
-2. Ensure the agent running the test has access to both credentials
-3. Check that credential names match exactly: `ldapMonUser` and `ldapMonPass`
+1. Create both `ldapMonUser` and `ldapMonPass` credentials
+2. Verify credentials exist in `Settings ▸ Secure Credentials`
+3. Ensure the agent has access to both credentials
+4. Check credential names match exactly (case-sensitive)
+
+#### "Warning: Invalid port 'X', using default 636"
+**Cause:** The `ldapPort` credential contains an invalid port number.
+
+**Solution:**
+1. Set `ldapPort` to either `389` (LDAP) or `636` (LDAPS)
+2. Remove `ldapPort` credential to use default 636 (LDAPS)
+3. Verify port matches your LDAP server configuration
+
+### **Connection Issues**
 
 #### "Connection failed after X attempts"
-**Cause:** Network connectivity issues or LDAP server is down.
+**Cause:** Network connectivity, firewall, or server availability issues.
 
 **Solution:**
-1. Verify the LDAP server hostname/IP and port are correct
-2. Check firewall rules between the agent and LDAP server
-3. For LDAPS (port 636), ensure TLS certificates are valid
-4. Test connectivity manually: `telnet ldap.example.com 636`
-5. Verify TLS version compatibility (script requires TLS 1.2 minimum, supports 1.3)
+1. Verify LDAP server hostname/IP in `ldapHost` credential
+2. Check firewall rules between agent and LDAP server
+3. Test connectivity: `telnet your-ldap-server 636`
+4. Verify LDAP service is running and accepting connections
+5. For LDAPS: Ensure port 636 is open and TLS is configured
 
-#### "Bind failed: invalidCredentials"
-**Cause:** The bind DN or password is incorrect.
-
-**Solution:**
-1. Verify the full bind DN format (e.g., `cn=monitor,ou=svc,dc=example,dc=com`)
-2. Check for special characters in the password that may need escaping
-3. Test credentials manually using `ldapsearch` or similar tool
-4. Ensure the account is not locked or expired
-
-#### "Bind failed: insufficientAccessRights"
-**Cause:** The monitoring account lacks necessary permissions.
+#### "TLS/Certificate validation failed after X attempts"
+**Cause:** LDAPS certificate validation issues (common with self-signed certificates).
 
 **Solution:**
-1. Verify the account has read access to the Root DSE
-2. Check LDAP server access control lists (ACLs)
-3. Contact your LDAP administrator to verify account permissions
+1. **For self-signed certificates:** Create `ldapCaBase64` credential with base64-encoded CA certificate
+2. **Get your CA certificate:**
+   ```bash
+   openssl s_client -connect your-ldap-server:636 -showcerts
+   # Copy the certificate(s) and base64 encode them
+   ```
+3. **For internal CAs:** Ensure the CA certificate is properly formatted in PEM format
+4. Test certificate manually: `openssl s_client -connect ldap.example.com:636`
+
+### **Authentication Issues**
+
+#### "Bind failed: invalidCredentials (49/0x31)"
+**Cause:** Incorrect bind DN or password.
+
+**Solution:**
+1. Verify full bind DN format in `ldapMonUser`: `cn=monitor,ou=svc,dc=example,dc=com`
+2. Check for typos in the Distinguished Name structure
+3. Verify password in `ldapMonPass` credential
+4. Test credentials manually:
+   ```bash
+   ldapsearch -x -H ldaps://your-server:636 \
+     -D "cn=monitor,ou=svc,dc=example,dc=com" \
+     -W -b "" -s base "(objectClass=*)"
+   ```
+5. Ensure account is not locked, expired, or disabled
+
+#### "Bind failed: insufficientAccessRights (50/0x32)"
+**Cause:** Monitoring account lacks necessary read permissions.
+
+**Solution:**
+1. Verify account has read access to the directory
+2. For Active Directory: Ensure account has "Read" permissions
+3. For OpenLDAP: Check ACL configuration in `slapd.conf` or `cn=config`
+4. Test with broader permissions temporarily to isolate the issue
+5. Contact LDAP administrator to verify account permissions
+
+#### "Bind failed: strongerAuthRequired (8/0x8)"
+**Cause:** Server requires stronger authentication (e.g., LDAPS instead of LDAP).
+
+**Solution:**
+1. Use LDAPS (port 636) instead of LDAP (port 389)
+2. Set `ldapPort` credential to `636`
+3. Provide `ldapCaBase64` credential if using self-signed certificates
+4. Verify server TLS configuration
+
+### **Search Issues**
+
+#### "Search failed: noSuchObject (32/0x20)"
+**Cause:** The base DN specified in `ldapBaseDN` doesn't exist.
+
+**Solution:**
+1. Verify base DN exists: `ou=People,dc=example,dc=com`
+2. Use `USE_BIND_DN` in `ldapBaseDN` to auto-detect from bind DN
+3. Remove `ldapBaseDN` credential to use Root DSE search
+4. Test with `ldapsearch` to verify base DN:
+   ```bash
+   ldapsearch -x -H ldaps://server:636 -D "bind-dn" -W \
+     -b "ou=People,dc=example,dc=com" -s base "(objectClass=*)"
+   ```
+
+#### "Search failed: SearchResultDone not found"
+**Cause:** Server returned non-standard LDAP response or response truncation.
+
+**Solution:**
+1. Try bind-only mode: Set `ldapBindOnly` credential to `true`
+2. Simplify search: Remove `ldapBaseDN` credential for Root DSE search
+3. Change filter: Use `(objectClass=*)` in `ldapFilter` credential
+4. Check server logs for errors or non-standard behavior
+
+### **Performance Issues**
 
 #### "Slow bind: X ms (>300ms threshold)"
-**Cause:** LDAP server performance issues or network latency.
+**Cause:** High latency or server performance issues.
 
 **Solution:**
-1. Increase the `slowMs` threshold if this is expected behavior
-2. Check LDAP server load and performance metrics
-3. Verify network latency between agent and LDAP server
-4. Consider using a closer agent or optimizing LDAP server
+1. **Expected high latency:** This is informational - monitor trends
+2. **Unexpected latency:**
+   - Check network latency between agent and server
+   - Verify LDAP server performance and load
+   - Consider using geographically closer agent
+   - Monitor server-side LDAP logs for performance insights
 
-### Performance Tuning
+#### "Slow search: X ms (>300ms threshold)"
+**Cause:** Search operation exceeding performance threshold.
 
-#### Adjusting Thresholds
-Different LDAP implementations have different performance characteristics:
+**Solution:**
+1. **Optimize search:**
+   - Use `ldapBindOnly = "true"` to skip search entirely
+   - Use smaller search scope with specific base DN
+   - Limit attributes: Set `ldapAttrs = "cn"` for minimal data
+2. **Server tuning:**
+   - Check LDAP server indexing on searched attributes
+   - Verify server has adequate resources (CPU, memory)
+   - Monitor concurrent LDAP operations
 
-- **Active Directory**: May require higher thresholds (400-500ms)
-- **OpenLDAP**: Typically faster (100-200ms)
-- **Load Balanced setups**: Should have tighter SLAs (150-250ms)
+### **Advanced Configuration**
 
-#### Optimizing Search Operations
-- Use Root DSE (`baseDN = ''`) for fastest response times
-- Limit search scope to `base` (already configured)
-- Use simple present filters such as the `objectClass` attribute
+#### **Custom Search Filters**
+The script supports various LDAP filter types through the `ldapFilter` credential:
 
-### Testing Outside ThousandEyes
+**Presence Filters** (recommended for health checks):
+```
+ldapFilter = "(objectClass=*)"     # Any object with objectClass attribute
+ldapFilter = "(cn=*)"              # Any object with common name
+ldapFilter = "(uid=*)"             # Any object with user ID (OpenLDAP)
+ldapFilter = "(sAMAccountName=*)"  # Any object with sAMAccountName (AD)
+```
 
-Before deploying to ThousandEyes, test your LDAP configuration locally:
+**Complex Filters** (fallback to objectClass presence):
+```
+ldapFilter = "(|(cn=admin)(uid=admin))"  # Will use (objectClass=*) internally
+```
 
+#### **Attribute Optimization**
+Minimize network traffic and improve performance by requesting specific attributes:
+
+**Minimal Monitoring** (fastest):
+```
+ldapAttrs = "cn"  # Only common name
+```
+
+**User Account Monitoring**:
+```
+ldapAttrs = "cn,uid,mail,telephoneNumber"  # OpenLDAP
+ldapAttrs = "sAMAccountName,displayName,mail"  # Active Directory
+```
+
+**No Attributes** (DN only):
+```
+# Remove ldapAttrs credential or set to empty string
+```
+
+#### **Performance Optimization Strategies**
+
+**Ultra-Fast Authentication Check**:
+```
+ldapBindOnly = "true"    # Skip search entirely (~50% faster)
+```
+
+**Lightweight Search**:
+```
+ldapBaseDN   = ""        # Root DSE search (fastest search base)
+ldapFilter   = "(objectClass=*)"
+# Remove ldapAttrs credential for minimal data transfer
+```
+
+**Targeted Search**:
+```
+ldapBaseDN   = "USE_BIND_DN"  # Search only the monitoring account
+ldapFilter   = "(objectClass=*)"
+ldapAttrs    = "cn"
+```
+
+### **Testing Before Deployment**
+
+Validate your configuration using standard LDAP tools before deploying to ThousandEyes:
+
+#### **Basic Connectivity Test**
 ```bash
-# Test LDAP bind (non-TLS)
-ldapsearch -x -H ldap://ldap.example.com:389 \
-  -D "cn=monitor,ou=svc,dc=example,dc=com" \
-  -w "password" \
-  -b "" -s base "(objectClass=*)"
+# Test LDAPS connection and certificate
+openssl s_client -connect your-ldap-server:636 -verify_return_error
 
-# Test LDAPS bind (TLS)
-ldapsearch -x -H ldaps://ldap.example.com:636 \
+# Test LDAP bind and search
+ldapsearch -x -H ldaps://your-ldap-server:636 \
   -D "cn=monitor,ou=svc,dc=example,dc=com" \
-  -w "password" \
+  -W \
   -b "" -s base "(objectClass=*)"
 ```
 
-## Advanced Configuration
-
-### Using the Example Configuration File
-
-This repository includes `ldap-monitor-config.example.js` with pre-configured templates for common LDAP servers. Since ThousandEyes doesn't support file imports, you'll need to:
-
-1. Open `ldap-monitor-config.example.js` to review example configurations
-2. Copy the relevant settings from the example that matches your LDAP server type
-3. Manually update the configuration values at the top of `ldap-monitor.js`
-4. Paste the modified script into ThousandEyes
-
-For example, if you're monitoring Active Directory, you might update your script settings to:
-```javascript
-const host      = 'dc01.corp.example.com';
-const port      = 636;
-const timeoutMs = 5000;
-const slowMs    = 500;  // AD can be slower
-const baseDN    = 'DC=corp,DC=example,DC=com';
+#### **Custom Filter Testing**
+```bash
+# Test your custom filter
+ldapsearch -x -H ldaps://your-ldap-server:636 \
+  -D "cn=monitor,ou=svc,dc=example,dc=com" \
+  -W \
+  -b "ou=People,dc=example,dc=com" \
+  -s sub "(sAMAccountName=*)" \
+  sAMAccountName displayName mail
 ```
 
-### Monitoring Multiple LDAP Servers
+#### **Certificate Preparation for Self-Signed**
+```bash
+# Extract certificate from server
+echo | openssl s_client -connect your-ldap-server:636 2>/dev/null | \
+  openssl x509 -out ldap-cert.pem
 
-To monitor multiple LDAP servers:
+# Convert to base64 for ldapCaBase64 credential
+base64 -i ldap-cert.pem | tr -d '\n'
+```
 
-1. Create separate tests for each server
-2. Use descriptive test names (e.g., "LDAP Monitor - DC01", "LDAP Monitor - DC02")
-3. Configure appropriate agents near each server
-4. Set up alert rules that consider your redundancy setup
+## Enterprise Deployment Patterns
 
-### Integration with Alert Management
+### **Multi-Server Monitoring**
 
-Best practices for alerting:
+For organizations with multiple LDAP servers, create separate tests with consistent naming:
 
-1. **Alert Fatigue Prevention**
-   - Set appropriate thresholds based on baseline performance
-   - Use consecutive round failures (3+) to avoid transient issues
-   - Configure maintenance windows for planned outages
+**Test Naming Convention:**
+- `LDAP Health - DC01 (Primary)`
+- `LDAP Health - DC02 (Secondary)`  
+- `LDAP Health - OpenLDAP (DMZ)`
 
-2. **Escalation Policies**
-   - Primary alerts: Operations team
-   - Escalation after 15 minutes: Infrastructure team
-   - Include LDAP server details in alert notifications
+**Server-Specific Credentials:**
+```
+# Primary Domain Controller
+ldapHost = "dc01.corp.example.com"
+ldapMonUser = "cn=ldap-monitor,ou=Service Accounts,dc=corp,dc=example,dc=com"
 
-3. **Alert Correlation**
-   - Group LDAP alerts by data center or region
-   - Correlate with application alerts that depend on LDAP
+# Secondary Domain Controller  
+ldapHost = "dc02.corp.example.com"
+ldapMonUser = "cn=ldap-monitor,ou=Service Accounts,dc=corp,dc=example,dc=com"
 
-## Contributing
+# DMZ OpenLDAP Server
+ldapHost = "ldap.dmz.example.com"
+ldapMonUser = "cn=monitor,dc=dmz,dc=example,dc=com"
+ldapFilter = "(uid=*)"
+```
 
-To contribute improvements to this monitoring script:
+### **High Availability Monitoring**
 
-1. Test changes thoroughly in your environment
-2. Document any new configuration options
-3. Include examples for different LDAP server types
-4. Submit pull requests with clear descriptions
+**Load Balancer Health Checks:**
+```
+# Monitor through load balancer VIP
+ldapHost = "ldap-vip.example.com"
+ldapBindOnly = "true"           # Fast health check
+```
 
-## Security Considerations
+**Regional Deployment:**
+- **Americas**: Monitor from US agents → US LDAP servers
+- **EMEA**: Monitor from EU agents → EU LDAP servers  
+- **APAC**: Monitor from APAC agents → APAC LDAP servers
 
-- Never commit credentials to version control
-- Use ThousandEyes Secure Credentials for all sensitive data
-- Regularly rotate monitoring account passwords
-- Use read-only accounts with minimal permissions
-- Enable LDAPS (TLS) for encrypted communications (supports TLS 1.2 and 1.3)
-- Monitor from trusted network segments when possible
+### **Alert Management Best Practices**
+
+#### **Tiered Alerting Strategy**
+1. **Level 1 - Performance Degradation**
+   - Trigger: Response time > 300ms for 2 consecutive rounds
+   - Action: Log and monitor trends
+
+2. **Level 2 - Service Impact**  
+   - Trigger: Authentication failures for 3 consecutive rounds
+   - Action: Alert operations team
+
+3. **Level 3 - Service Outage**
+   - Trigger: Connection failures for 5 consecutive rounds
+   - Action: Page on-call engineer
+
+#### **Alert Correlation**
+- Group alerts by data center/region to identify widespread issues
+- Correlate with dependent application alerts (email, SSO, etc.)
+- Use ThousandEyes integrations with PagerDuty, ServiceNow, or Slack
+
+### **Compliance and Audit Requirements**
+
+#### **SOC 2 / ISO 27001 Compliance**
+- **Monitoring Coverage**: Document all critical LDAP infrastructure
+- **Alert Response**: Maintain logs of alert response times
+- **Access Control**: Use role-based access to ThousandEyes credentials
+- **Change Management**: Track all monitoring configuration changes
+
+#### **Audit Trail**
+- Monitor authentication success/failure rates
+- Track certificate expiration dates (via ldapCaBase64 certificates)
+- Document baseline performance metrics for capacity planning
+
+## Technical Specifications
+
+### **Script Capabilities**
+- **Protocol Support**: LDAP (389) and LDAPS (636) with TLS 1.2/1.3
+- **Authentication**: LDAPv3 Simple Bind with comprehensive error handling
+- **Search Operations**: Configurable filters, attributes, and search scopes
+- **Error Handling**: 24 standard LDAP result codes with detailed diagnostics
+- **Performance**: Optimized for <300ms response times, <67KB script size
+- **Compatibility**: Active Directory, OpenLDAP, ApacheDS, and RFC 4511 compliant servers
+
+### **Network Requirements**
+- **Outbound Connectivity**: Agents need access to LDAP server ports
+- **Firewall Rules**: Port 636 (LDAPS) or 389 (LDAP) outbound from agent subnets
+- **Certificate Validation**: For LDAPS, ensure certificate chain is trusted or use ldapCaBase64
+
+### **Security Implementation**
+- **Credential Encryption**: All sensitive data stored in ThousandEyes Secure Credentials
+- **Zero Trust**: No hardcoded credentials or configuration in script
+- **TLS Enforcement**: Supports custom CA certificates for internal PKI
+- **Minimal Permissions**: Monitor accounts require only read access to tested base DNs
+
+## Support and Contributing
+
+### **Getting Help**
+1. **Configuration Issues**: Review troubleshooting guide above
+2. **Performance Optimization**: Check advanced configuration patterns
+3. **Custom Requirements**: Script supports extensive customization via credentials
+
+### **Contributing Improvements**
+To contribute enhancements to this monitoring script:
+
+1. **Testing**: Validate changes against multiple LDAP server types
+2. **Documentation**: Update README with new configuration options
+3. **Compatibility**: Ensure changes work within ThousandEyes environment constraints
+4. **Examples**: Provide real-world use cases and configuration samples
 
 ## License
 
-This monitoring script is provided as-is for use with ThousandEyes platform.
+This LDAP monitoring script is provided as-is for use with the ThousandEyes platform. 
+
+**Compatibility**: ThousandEyes Enterprise Agents with JavaScript transaction support.  
+**Version**: Enhanced for enterprise monitoring with comprehensive error handling and flexible configuration.
