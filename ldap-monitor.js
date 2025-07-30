@@ -296,6 +296,63 @@ async function runTest() {
   const ctx0 = (b) => Buffer.concat([Buffer.from([0x80]), berLen(b.length), b]);
   /* ---------------------------------------------------------------- */
 
+  /* --------- LDAP Result Codes and Error Messages --------- */
+  /**
+   * Comprehensive LDAP result codes for better error diagnosis
+   * Based on RFC 4511 and common LDAP implementations
+   */
+  const LDAP_RESULT_CODES = {
+    0x00: { name: 'success', description: 'The operation completed successfully' },
+    0x01: { name: 'operationsError', description: 'The operation is not properly sequenced with respect to other operations' },
+    0x02: { name: 'protocolError', description: 'The server received data that is not well-formed or the LDAP version is not supported' },
+    0x03: { name: 'timeLimitExceeded', description: 'The time limit specified by the client was exceeded before the operation could complete' },
+    0x04: { name: 'sizeLimitExceeded', description: 'The size limit specified by the client was exceeded before the operation could complete' },
+    0x07: { name: 'authMethodNotSupported', description: 'The requested authentication method or mechanism is not supported by the server' },
+    0x08: { name: 'strongerAuthRequired', description: 'The server requires stronger authentication to complete the operation' },
+    0x0B: { name: 'adminLimitExceeded', description: 'An administrative limit (e.g., maximum number of entries, operations, or subordinates) has been exceeded' },
+    0x0C: { name: 'unavailableCriticalExtension', description: 'A critical control in the request is unrecognized or unsupported' },
+    0x0D: { name: 'confidentialityRequired', description: 'The operation requires confidentiality (e.g., TLS) that is not in place' },
+    0x10: { name: 'noSuchAttribute', description: 'The target entry does not contain the specified attribute or attribute value' },
+    0x11: { name: 'undefinedAttributeType', description: 'The request references an attribute description not defined in the server\'s schema' },
+    0x12: { name: 'inappropriateMatching', description: 'A matching rule was used that is not defined for the attribute\'s syntax' },
+    0x13: { name: 'constraintViolation', description: 'An attribute value violates a constraint (e.g., supplying multiple values to a SINGLE-VALUE attribute)' },
+    0x14: { name: 'attributeOrValueExists', description: 'Attempted to add an attribute or value that already exists in the entry' },
+    0x15: { name: 'invalidAttributeSyntax', description: 'An attribute value does not conform to the attribute\'s defined syntax' },
+    0x20: { name: 'noSuchObject', description: 'The specified object does not exist in the directory information tree (DIT)' },
+    0x21: { name: 'aliasProblem', description: 'An alias error occurred (e.g., an alias names no object when dereferenced)' },
+    0x22: { name: 'invalidDNSyntax', description: 'A Distinguished Name (DN) in the request does not conform to the required syntax' },
+    0x24: { name: 'aliasDereferencingProblem', description: 'A problem occurred while dereferencing an alias' },
+    0x30: { name: 'inappropriateAuthentication', description: 'Anonymous or no-credential bind attempted when credentials are required' },
+    0x31: { name: 'invalidCredentials', description: 'The provided credentials (DN/password) are incorrect, expired, or the account is locked' },
+    0x32: { name: 'insufficientAccessRights', description: 'The client lacks sufficient privileges to perform the operation' },
+    0x33: { name: 'busy', description: 'The server is too busy to process the request at this time—you may retry later' },
+    0x34: { name: 'unavailable', description: 'The server (or a necessary subsystem) is shutting down or offline' },
+    0x35: { name: 'unwillingToPerform', description: 'The server is unwilling to perform the operation (often due to server-specific policy)' },
+    0x36: { name: 'loopDetect', description: 'The server detected an internal loop (e.g., alias or referral loop) and aborted' },
+    0x40: { name: 'namingViolation', description: 'The name of the entry violates naming restrictions defined by the directory\'s schema' },
+    0x41: { name: 'objectClassViolation', description: 'The entry violates object class constraints (e.g., required attributes missing)' },
+    0x42: { name: 'notAllowedOnNonLeaf', description: 'The operation is not allowed on a non-leaf entry (e.g., attempting to delete a non-leaf node)' },
+    0x43: { name: 'notAllowedOnRDN', description: 'Attempted to remove or modify an attribute that forms the entry\'s RDN' },
+    0x44: { name: 'entryAlreadyExists', description: 'Cannot add, move, or rename an entry because the target already exists' },
+    0x45: { name: 'objectClassModsProhibited', description: 'Modifying the objectClass attribute is not allowed (e.g., changing an entry\'s structural class)' },
+    0x47: { name: 'affectsMultipleDSAs', description: 'The operation would span multiple directory servers (DSAs) and cannot be performed as a single operation' },
+    0x50: { name: 'other', description: 'An internal error occurred that does not fit another code' }
+  };
+
+  /**
+   * Get a human-readable LDAP error message
+   * @param {number} resultCode - The LDAP result code
+   * @returns {string} Formatted error message with code, name, and description
+   */
+  const getLdapErrorMessage = (resultCode) => {
+    const errorInfo = LDAP_RESULT_CODES[resultCode];
+    if (errorInfo) {
+      return `${errorInfo.name} (${resultCode}/0x${resultCode.toString(16)}): ${errorInfo.description}`;
+    }
+    return `Unknown LDAP result code ${resultCode} (0x${resultCode.toString(16)})`;
+  };
+  /* ---------------------------------------------------------------- */
+
   /* --------- TLS information logging (defensive for TypeScript) --------- */
   /**
    * Log TLS connection information in a TypeScript-safe way
@@ -726,14 +783,7 @@ async function runTest() {
         console.log(`Result code at position ${resultCodePosition}: 0x${paddedHex} (${resultCode})`);
         
         if (resultCode !== 0x00) {
-          const errorMessages = {
-            0x01: 'operationsError',
-            0x07: 'authMethodNotSupported', 
-            0x08: 'strongerAuthRequired',
-            0x31: 'invalidCredentials',
-            0x32: 'insufficientAccessRights'
-          };
-          const errorMsg = errorMessages[resultCode] || `code 0x${resultCode.toString(16)}`;
+          const errorMsg = getLdapErrorMessage(resultCode);
           throw new Error(`Bind failed: ${errorMsg}`);
         }
         
@@ -1037,7 +1087,8 @@ async function runTest() {
               console.log('Search completed successfully (result code 0x00) - different message structure but valid response');
               // Continue with normal processing
             } else if (resultCode !== null) {
-              throw new Error(`Search failed with result code 0x${toHexSearch(resultCode)} (${resultCode})`);
+              const errorMsg = getLdapErrorMessage(resultCode);
+              throw new Error(`Search failed: ${errorMsg}`);
             } else {
               console.log('SearchResultDone found but could not determine result code - assuming success');
               // Continue with normal processing
@@ -1084,7 +1135,8 @@ async function runTest() {
           const directResultCode = searchRsp[resultCodePos];
           console.log(`Direct result code at position ${resultCodePos}: 0x${toHexSearch(directResultCode)} (${directResultCode})`);
           if (directResultCode !== 0x00) {
-            throw new Error(`Search failed: code 0x${toHexSearch(directResultCode)}`);
+            const errorMsg = getLdapErrorMessage(directResultCode);
+            throw new Error(`Search failed: ${errorMsg}`);
           }
           console.log('Search completed successfully with empty result set');
         } else {
@@ -1100,7 +1152,8 @@ async function runTest() {
       const searchResultCode = searchRsp[doneIndex + 4];
       console.log(`Search result code at position ${doneIndex + 4}: 0x${toHexSearch(searchResultCode)} (${searchResultCode})`);
       if (searchResultCode !== 0x00) {
-        throw new Error(`Search failed: code 0x${toHexSearch(searchResultCode)}`);
+        const errorMsg = getLdapErrorMessage(searchResultCode);
+        throw new Error(`Search failed: ${errorMsg}`);
       }
       console.log('Search completed successfully');
     }
