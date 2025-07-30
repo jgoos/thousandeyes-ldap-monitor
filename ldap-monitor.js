@@ -523,6 +523,16 @@ async function runTest() {
   };
 
   /**
+   * Helper function for hex formatting (compatible with older JS)
+   * @param {number} num - Number to format as hex
+   * @returns {string} Two-digit hex string
+   */
+  const toHexSearch = (num) => {
+    const hex = num.toString(16);
+    return hex.length === 1 ? '0' + hex : hex;
+  };
+
+  /**
    * Parse BER length field starting at given position
    * @param {any} buffer - The buffer to parse
    * @param {number} pos - Position of length field
@@ -1000,12 +1010,6 @@ async function runTest() {
     console.log(`Received search response: ${searchRsp.length} bytes`);
     const maxSearchBytes = searchRsp.length < 32 ? searchRsp.length : 32;
     console.log(`Search response hex (first 32 bytes): ${searchRsp.slice(0, maxSearchBytes).toString('hex')}`);
-    
-    // Helper function for hex formatting (reuse from bind)
-    const toHexSearch = (num) => {
-      const hex = num.toString(16);
-      return hex.length === 1 ? '0' + hex : hex;
-    };
     
     // Debug the search response structure
     if (searchRsp.length > 0) {
