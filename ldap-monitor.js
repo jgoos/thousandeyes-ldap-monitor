@@ -640,6 +640,12 @@ async function runTest() {
     console.log(`Using search scope: ${searchScope} (0=base, 1=one-level, 2=subtree)`);
     console.log(`Search filter: (${filterAttr}=*) - checking for presence of ${filterAttr} attribute`);
     console.log(`Note: Using uid filter instead of objectClass to avoid potential access restrictions`);
+    console.log(`Search target: base DN '${baseDN}' with base scope (0) - searching only the exact DN object`);
+    
+    // For debugging: log what we expect to find
+    if (baseDN.includes('ou=People')) {
+      console.log(`Warning: Base scope search on organizational unit may not work. Consider removing 'ou=People' part or using your exact bind DN.`);
+    }
     
     const searchReqBody = Buffer.concat([
       str(baseDN),         // baseObject
@@ -777,7 +783,20 @@ async function runTest() {
           throw new Error(`${errorDetails}${solution}`);
         }
         
-        throw new Error(`Search failed: Unexpected response type 0x${toHexSearch(responseType)} at position 8. Expected 0x64 (SearchResultEntry) or 0x65 (SearchResultDone).${baseDnHint}`);
+        // Handle specific response types with detailed explanations
+        if (responseType === 0x01) {
+          let suggestion = '';
+          if (baseDN.includes('ou=People')) {
+            suggestion = ` Try using your exact bind DN instead: 'uid=sa-iam-monitor,${baseDN}' or remove the ldapBaseDN credential to use Root DSE.`;
+          } else {
+            suggestion = ` Consider using your exact bind DN or a different base DN structure.`;
+          }
+          throw new Error(`Search failed: Response type 0x01 indicates an LDAP Operations Error. The base DN '${baseDN}' exists but the search operation failed - likely because an organizational unit doesn't have 'uid' attributes.${suggestion}`);
+        } else if (responseType === 0x78) {
+          throw new Error(`Search failed: Response type 0x78 indicates an Extended Response. This may be an unsupported operation or protocol mismatch.`);
+        } else {
+          throw new Error(`Search failed: Unexpected response type 0x${toHexSearch(responseType)} at position 8. Expected 0x64 (SearchResultEntry) or 0x65 (SearchResultDone).${baseDnHint}`);
+        }
       }
     }
 
