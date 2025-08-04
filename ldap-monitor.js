@@ -794,34 +794,36 @@ async function runTest() {
       const searchChunks = [];
       let totalBytesRead = 0;
       let consecutiveEmptyReads = 0;
-      
+      let expected;
+
       while (true) {
         const chunk = await sock.read();
         if (!chunk || chunk.length === 0) {
           consecutiveEmptyReads++;
-          if (consecutiveEmptyReads >= 3) {
-            // No more data available, process what we have
-            break;
-          }
+          if (consecutiveEmptyReads >= 3) break;
           continue;
         }
-        
+
         consecutiveEmptyReads = 0;
         searchChunks.push(chunk);
         totalBytesRead += chunk.length;
-        
-        // Check if we have enough data to contain a complete LDAP response
-        if (totalBytesRead > 10) {
-          const combinedData = safeBufferConcat(searchChunks);
-          if (combinedData && findSearchDoneIndex(combinedData) !== -1) {
-            // Found valid SearchResultDone, we have complete response
-            break;
-          }
-        }
-        
-        // Safety limit to prevent infinite reading
+
         if (totalBytesRead > MAX_RESPONSE_SIZE) {
           throw new Error('Search response too large - possible protocol error');
+        }
+
+        if (expected === undefined) {
+          expected = 0;
+          const cd = safeBufferConcat(searchChunks);
+          const len = cd && parseBerLength(cd, 1);
+          if (len) expected = 1 + len.bytesUsed + len.length;
+        }
+
+        if (expected) {
+          if (totalBytesRead >= expected) break;
+        } else if (expected === 0 && totalBytesRead > 10) {
+          const cd = safeBufferConcat(searchChunks);
+          if (cd && findSearchDoneIndex(cd) !== -1) break;
         }
       }
       metrics.searchEnd = Date.now();
