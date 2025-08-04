@@ -1,0 +1,12 @@
+- id: 4
+  name: "Extend Response Type Handling"
+  context: |
+    The script currently handles 0x65, 0x64, 0x82 and 0x06. LDAP also defines SearchResultReference (0x73) and intermediateResponse. We need graceful handling for those tags.
+  prompt: |-
+    In the section that switches on `responseType = buffer[8]`, add cases to:
+      1. Detect tag 0x73 (SearchResultReference) and skip over its TLV using `parseBerLength`, continuing the scan.
+      2. Detect intermediateResponse (0x79) and treat it as non-fatal (skip).
+      3. For unknown but valid LDAP tags (context-specific 0xA0–0xBF), skip their TLV instead of throwing.
+      4. Keep the additional code under 1 KB to respect the overall character budget.
+  status: done
+
