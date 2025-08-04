@@ -15,6 +15,7 @@ tasks:
 
   - id: 2
     name: "Add Deep LDAP Message Structure Validation"
+    status: done
     context: |
       Beyond checking for SEQUENCE (0x30) at offset 0, responses should validate the top-level TLV structure and ensure reported lengths match actual data, without adding external libraries.
     prompt: |-
