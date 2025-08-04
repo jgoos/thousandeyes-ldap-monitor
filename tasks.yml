@@ -2,6 +2,7 @@
 tasks:
   - id: 1
     name: "Enhance BER Length Parsing Robustness"
+    status: done
     context: |
       The parseBerLength(buffer, pos) helper must remain under 100 KB total script size, run in the ThousandEyes JS sandbox (no native sockets, only `Buffer` and `thousandeyes.net`), and reject malformed or malicious length fields.
     prompt: |-
