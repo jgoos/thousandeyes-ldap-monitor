@@ -27,6 +27,7 @@ tasks:
 
   - id: 3
     name: "Optimize Chunked Response Reading Using BER Length"
+    status: done
     context: |
       Currently the script reads chunks until SearchResultDone is detected. We can save memory and CPU by stopping reads once the expected TLV end offset is known.
     prompt: |-
