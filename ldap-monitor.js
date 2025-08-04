@@ -408,30 +408,22 @@ async function runTest() {
   const parseBerLength = (buffer, pos) => {
     try {
       if (!buffer || pos >= buffer.length) return null;
-      
-      const firstByte = buffer[pos];
-      
-      if (firstByte <= 0x7F) {
-        // Short form: length is 0-127, encoded in 1 byte
-        return { length: firstByte, bytesUsed: 1 };
-      } else if (firstByte === 0x80) {
-        // Indefinite form: not allowed in SearchResultDone
+      const first = buffer[pos];
+      let len, hdr;
+      if (first <= 0x7F) {
+        len = first; hdr = 1;
+      } else if (first === 0x80) {
         return null;
       } else {
-        // Long form: first byte is 0x81-0x84 indicating number of length octets
-        const lengthOctets = firstByte & 0x7F;
-        if (lengthOctets > 4 || pos + lengthOctets >= buffer.length) {
-          return null; // Too many octets or not enough bytes
-        }
-        
-        let length = 0;
-        for (let i = 1; i <= lengthOctets; i++) {
-          length = (length << 8) | buffer[pos + i];
-        }
-        
-        return { length: length, bytesUsed: 1 + lengthOctets };
+        const octets = first & 0x7F;
+        if (octets < 1 || octets > 4 || pos + octets >= buffer.length) return null;
+        len = 0; hdr = 1 + octets;
+        for (let i = 1; i <= octets; i++) len = (len << 8) | buffer[pos + i];
       }
-    } catch (error) {
+      return (len + hdr > Number.MAX_SAFE_INTEGER || len + hdr > buffer.length - pos)
+        ? null
+        : { length: len, bytesUsed: hdr };
+    } catch (e) {
       return null;
     }
   };
