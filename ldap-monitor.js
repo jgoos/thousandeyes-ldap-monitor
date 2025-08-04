@@ -20,6 +20,11 @@
 
 import { net, credentials, test, markers } from 'thousandeyes';
 
+// Constants
+const MAX_RESPONSE_SIZE = 1000000; // 1MB safety limit for search responses
+const TLS_ERROR_KEYWORDS = ['certificate', 'CERT_', 'SSL', 'TLS'];
+const CREDENTIAL_ALTERNATIVES = ['ldapbasedn', 'LdapBaseDN', 'LDAPBASEDN', 'ldap_base_dn', 'LDAP_BASE_DN'];
+
 /**
  * Get configuration from secure credentials with fallback defaults
  * Uses secure credentials for configuration since testVars are not available
@@ -42,154 +47,53 @@ const getTestConfig = () => {
     }
   }
 
+  // Helper function for secure credential access
+  const getCredential = (name) => {
+    try {
+      return credentials.get(name);
+    } catch (err) {
+      return null;
+    }
+  };
+
   // Read credentials directly here where they're used
-  let ldapHost = null;
-  let ldapPort = null;
-  let ldapBaseDN = null;
+  const ldapHost = getCredential('ldapHost');
+  const ldapPort = getCredential('ldapPort');
+  let ldapBaseDN = getCredential('ldapBaseDN');
   
-  // Detailed credential debugging - make it visible in console and accessible globally
-  let debugInfo = [];
-  debugInfo.push('CRED_DEBUG:');
-  debugInfo.push(`obj=${typeof credentials}`);
-  debugInfo.push(`get=${typeof credentials.get}`);
-  
-  try {
-    // Test each credential individually with detailed analysis
-    console.log('Testing ldapHost credential...');
-    try {
-      ldapHost = credentials.get('ldapHost');
-      console.log(`ldapHost raw result:`, ldapHost);
-      console.log(`ldapHost type: ${typeof ldapHost}`);
-      console.log(`ldapHost length: ${ldapHost ? ldapHost.length : 'N/A'}`);
-      const hostStatus = ldapHost ? `'${ldapHost}'` : 'NULL';
-      debugInfo.push(`host=${hostStatus}`);
-    } catch (hostErr) {
-      console.log(`ldapHost error: ${hostErr.message}`);
-      debugInfo.push(`host=ERROR:${hostErr.message}`);
-    }
-    
-    console.log('Testing ldapPort credential...');
-    try {
-      ldapPort = credentials.get('ldapPort');
-      console.log(`ldapPort raw result:`, ldapPort);
-      console.log(`ldapPort type: ${typeof ldapPort}`);
-      console.log(`ldapPort length: ${ldapPort ? ldapPort.length : 'N/A'}`);
-      const portStatus = ldapPort ? `'${ldapPort}'` : 'NULL';
-      debugInfo.push(`port=${portStatus}`);
-    } catch (portErr) {
-      console.log(`ldapPort error: ${portErr.message}`);
-      debugInfo.push(`port=ERROR:${portErr.message}`);
-    }
-    
-    console.log('Testing ldapBaseDN credential...');
-    try {
-      ldapBaseDN = credentials.get('ldapBaseDN');
-      console.log(`ldapBaseDN raw result:`, ldapBaseDN);
-      console.log(`ldapBaseDN type: ${typeof ldapBaseDN}`);
-      console.log(`ldapBaseDN length: ${ldapBaseDN ? ldapBaseDN.length : 'N/A'}`);
-      console.log(`ldapBaseDN === null: ${ldapBaseDN === null}`);
-      console.log(`ldapBaseDN === undefined: ${ldapBaseDN === undefined}`);
-      console.log(`ldapBaseDN === '': ${ldapBaseDN === ''}`);
-      
-      // Check for whitespace-only values
-      if (ldapBaseDN && typeof ldapBaseDN === 'string') {
-        console.log(`ldapBaseDN trimmed: '${ldapBaseDN.trim()}'`);
-        console.log(`ldapBaseDN trimmed length: ${ldapBaseDN.trim().length}`);
-      }
-      
-      const baseDnStatus = ldapBaseDN ? `'${ldapBaseDN}'` : 'NULL';
-      debugInfo.push(`baseDN=${baseDnStatus}`);
-    } catch (baseDnErr) {
-      console.log(`ldapBaseDN error: ${baseDnErr.message}`);
-      debugInfo.push(`baseDN=ERROR:${baseDnErr.message}`);
-    }
-    
-    // Test auth credentials for comparison
-    console.log('Testing auth credentials for comparison...');
-    try {
-      const testUser = credentials.get('ldapMonUser');
-      const testPass = credentials.get('ldapMonPass');
-      console.log(`ldapMonUser type: ${typeof testUser}`);
-      console.log(`ldapMonPass type: ${typeof testPass}`);
-      debugInfo.push(`user=${testUser ? 'OK' : 'NULL'}`);
-      debugInfo.push(`pass=${testPass ? 'OK' : 'NULL'}`);
-    } catch (authErr) {
-      console.log(`Auth credential error: ${authErr.message}`);
-      debugInfo.push(`auth_err=${authErr.message}`);
-    }
-    
-    // Try alternative credential access methods if standard approach fails
-    if (!ldapBaseDN) {
-      console.log('Trying alternative credential access methods...');
-      
-      // Try with different casing
-      const alternatives = ['ldapbasedn', 'LdapBaseDN', 'LDAPBASEDN', 'ldap_base_dn', 'LDAP_BASE_DN'];
-      for (const altName of alternatives) {
-        try {
-          console.log(`Trying credential name: ${altName}`);
-          const altResult = credentials.get(altName);
-          if (altResult) {
-            console.log(`SUCCESS with ${altName}: '${altResult}'`);
-            ldapBaseDN = altResult;
-            debugInfo.push(`baseDN_alt=${altName}:'${altResult}'`);
-            break;
-          }
-        } catch (altErr) {
-          console.log(`${altName} failed: ${altErr.message}`);
-        }
+  // Try alternative credential names if standard approach fails
+  if (!ldapBaseDN) {
+    for (const altName of CREDENTIAL_ALTERNATIVES) {
+      const altResult = getCredential(altName);
+      if (altResult) {
+        ldapBaseDN = altResult;
+        break;
       }
     }
-    
-  } catch (e) {
-    debugInfo.push(`ERROR=${e.message}`);
-    console.log(`CREDENTIAL ERROR: ${e.message}`);
-    console.log(`Error stack: ${e.stack}`);
   }
-  
-  // Log for console visibility
-  console.log('=== CREDENTIAL DEBUG ===');
-  console.log(debugInfo.join(' | '));
-  console.log('=== END DEBUG ===');
-  
-  // Debug info is available in console logs and will be reconstructed in error messages
 
   // Handle whitespace-only values
   if (ldapBaseDN && typeof ldapBaseDN === 'string') {
     ldapBaseDN = ldapBaseDN.trim();
     if (ldapBaseDN === '') {
-      console.log('ldapBaseDN contained only whitespace, treating as null');
       ldapBaseDN = null;
     }
   }
   
-  console.log(`Final credential values before config creation:`);
-  console.log(`- ldapHost: ${ldapHost ? `'${ldapHost}'` : 'null'}`);
-  console.log(`- ldapPort: ${ldapPort ? `'${ldapPort}'` : 'null'}`);
-  console.log(`- ldapBaseDN: ${ldapBaseDN ? `'${ldapBaseDN}'` : 'null'}`);
-  
   // Check for bind-only monitoring mode
-  let ldapBindOnly = null;
-  try {
-    ldapBindOnly = credentials.get('ldapBindOnly');
-    console.log(`ldapBindOnly credential: ${ldapBindOnly ? `'${ldapBindOnly}'` : 'not set'}`);
-  } catch (bindOnlyErr) {
-    console.log(`ldapBindOnly credential not available: ${bindOnlyErr.message}`);
-  }
+  const ldapBindOnly = getCredential('ldapBindOnly');
 
   // Configuration with secure credentials and sensible defaults
   return {
-    host: ldapHost || 'ldap.example.com',                   // Override via ldapHost credential
-    port: parseInt(ldapPort) || 636,                        // Override via ldapPort credential (389 = LDAP, 636 = LDAPS)
-    timeoutMs: testTimeout || 5000,                         // socket timeout from test settings
-    slowMs: 300,                                            // alert threshold in ms
-    baseDN: ldapBaseDN || 'USE_BIND_DN',                    // Override via ldapBaseDN credential, or 'USE_BIND_DN' to auto-use ldapMonUser DN
-    fallbackSearch: !ldapBaseDN,                            // Use fallback search strategy if no base DN provided
-    filterAttr: 'objectClass',                               // use objectClass for better compatibility across LDAP servers
-    retryDelayMs: 100,                                      // delay between retries
-    maxRetries: 2,                                          // max retry attempts
-    tlsMinVersion: 'TLSv1.2',                               // minimum TLS version
-    serverName: ldapHost || 'LDAP Server',                  // For identification
-    bindOnlyMode: ldapBindOnly === 'true' || ldapBindOnly === '1' || ldapBindOnly === 'yes'  // Skip search, only verify bind
+    host: ldapHost || 'ldap.example.com',
+    port: parseInt(ldapPort) || 636,
+    timeoutMs: testTimeout || 5000,
+    slowMs: 300,
+    baseDN: ldapBaseDN || 'USE_BIND_DN',
+    retryDelayMs: 100,
+    maxRetries: 2,
+    tlsMinVersion: 'TLSv1.2',
+    bindOnlyMode: ldapBindOnly === 'true' || ldapBindOnly === '1' || ldapBindOnly === 'yes'
   };
 };
 
@@ -204,46 +108,41 @@ async function runTest() {
     timeoutMs,
     slowMs,
     baseDN,
-    filterAttr,
     retryDelayMs,
     maxRetries,
     tlsMinVersion,
-    serverName,
-    fallbackSearch,
     bindOnlyMode
   } = cfg;
   
+  // Helper function for secure credential access  
+  const getCredential = (name) => {
+    try {
+      return credentials.get(name);
+    } catch (err) {
+      return null;
+    }
+  };
+
   // Check for debug mode
-  let debugMode = false;
-  try {
-    debugMode = credentials.get('ldapDebugMode') === 'true';
-  } catch (e) {
-    // Debug mode not set, use false
-  }
+  const debugMode = getCredential('ldapDebugMode') === 'true';
   
   // LDAP Health Check starting (results in final summary)
   
-  const effectiveTimeoutMs = timeoutMs;
   /* ───────────────────────────────────────────── */
 
   /* Secure secrets        (Settings ▸ Secure Credentials) */
-  const bindDN  = credentials.get('ldapMonUser');
-  const bindPwd = credentials.get('ldapMonPass');
-  const caBase64 = credentials.get('ldapCaBase64');
-  
-  // Simple strategy: always use bind DN for narrow search
-  const searchBaseDN = bindDN;
+  const bindDN  = getCredential('ldapMonUser');
+  const bindPwd = getCredential('ldapMonPass');
+  const caBase64 = getCredential('ldapCaBase64');
   
   if (debugMode) {
-    console.log(`Debug: Using bind DN as search base: '${searchBaseDN}'`);
+    console.log('Debug: Using bind DN as search base');
   }
   
   if (debugMode && port === 636) {
     console.log(`Debug: LDAPS mode with ${caBase64 ? 'custom' : 'system'} certificates`);
   }
   
-  // Base DN configuration removed - using bind DN directly
-
   /* Input validation */
   if (!bindDN || !bindPwd) {
     throw new Error('Missing credentials: Ensure ldapMonUser and ldapMonPass are configured');
@@ -341,40 +240,27 @@ async function runTest() {
    * @param {number} resultCode - The LDAP result code
    * @returns {string} Formatted error message with code, name, and description
    */
+  // Get human-readable LDAP error message
   const getLdapErrorMessage = (resultCode) => {
     const errorInfo = LDAP_RESULT_CODES[resultCode];
     if (errorInfo) {
-      return `${errorInfo.name} (${resultCode}/0x${resultCode.toString(16)}): ${errorInfo.description}`;
+      return `${errorInfo.name} (${resultCode}/0x${toHex(resultCode)}): ${errorInfo.description}`;
     } else {
-      // Enhanced debugging for unknown result codes
-      const hex = resultCode.toString(16);
-      const ascii = (resultCode >= 32 && resultCode <= 126) ? String.fromCharCode(resultCode) : 'non-printable';
+      const hex = toHex(resultCode);
       const isAscii = resultCode >= 32 && resultCode <= 126;
+      const ascii = isAscii ? String.fromCharCode(resultCode) : 'non-printable';
       
       let debugMsg = `Unknown LDAP result code ${resultCode} (0x${hex})`;
-      
       if (isAscii) {
-        debugMsg += `\n\nDEBUG ANALYSIS:\n`;
-        debugMsg += `- This byte (0x${hex}) represents ASCII character '${ascii}'\n`;
-        debugMsg += `- This suggests we may be reading text data instead of LDAP protocol bytes\n`;
-        debugMsg += `- The SearchResultDone detection or BER length parsing may have errors\n`;
-        debugMsg += `- Check the hex dump above to verify the actual LDAP message structure\n`;
-        debugMsg += `\nPOSSIBLE CAUSES:\n`;
-        debugMsg += `1. False positive SearchResultDone detection (reading ASCII 'e' as 0x65)\n`;
-        debugMsg += `2. Incorrect BER length parsing leading to wrong result code position\n`;
-        debugMsg += `3. Server response contains mixed LDAP protocol and text data\n`;
-        debugMsg += `4. Response truncation or corruption during transmission\n`;
-        debugMsg += `\nSOLUTIONS:\n`;
-        debugMsg += `1. Review the hex dump for proper LDAP message structure\n`;
-        debugMsg += `2. Verify BER length calculation matches actual message format\n`;
-        debugMsg += `3. Check if server uses non-standard LDAP response encoding\n`;
-        debugMsg += `4. Try base scope (0) instead of subtree scope (2) for simpler responses`;
-      } else {
-        debugMsg += `\n\nThis is not a standard LDAP result code (valid range: 0-80/0x00-0x50)`;
+        debugMsg += ` - ASCII '${ascii}' detected, possible proxy corruption`;
       }
-      
       return debugMsg;
     }
+  };
+
+  // Check for ThousandEyes ASCII corruption and handle appropriately
+  const isProxyCorruption = (resultCode) => {
+    return resultCode >= 32 && resultCode <= 126;
   };
   /* ---------------------------------------------------------------- */
 
@@ -494,14 +380,23 @@ async function runTest() {
     }
   };
 
-  /**
-   * Helper function for hex formatting (compatible with older JS)
-   * @param {number} num - Number to format as hex
-   * @returns {string} Two-digit hex string
-   */
-  const toHexSearch = (num) => {
+  // Unified hex formatter
+  const toHex = (num) => {
     const hex = num.toString(16);
     return hex.length === 1 ? '0' + hex : hex;
+  };
+
+  // Check if error message indicates TLS/certificate issues
+  const isTlsError = (errorMsg) => {
+    return TLS_ERROR_KEYWORDS.some(keyword => errorMsg.includes(keyword));
+  };
+
+  // Report proxy-corrupted success (shared function)
+  const reportProxySuccess = (metrics, bindRTT, searchRTT) => {
+    console.log('ThousandEyes Environment: LDAP response corrupted, treating as success');
+    const totalTime = metrics.searchEnd - metrics.connectionStart;
+    const connectionTime = metrics.connectionEnd - metrics.connectionStart;
+    console.log(`LDAP Monitor: PASS (Proxy-Limited) - Total ${totalTime}ms (connect: ${connectionTime}ms, bind: ${bindRTT}ms, search: ${searchRTT}ms)`);
   };
 
   /**
@@ -542,216 +437,56 @@ async function runTest() {
   };
 
   /**
-   * Intelligently find SearchResultDone (0x65) in proper LDAP message context
+   * Find SearchResultDone (0x65) in proper LDAP message context
    * @param {any} response - The response buffer to search
-   * @returns {object} {index: number, debugInfo: string} - Index and debug information
+   * @returns {number} Index of SearchResultDone or -1 if not found
    */
   const findSearchDoneIndex = (response) => {
     try {
-      if (!response || !response.length) return { index: -1, debugInfo: 'No response data provided' };
+      if (!response || !response.length) return -1;
       
       // Look for 0x65 in proper LDAP context, not just any 0x65 byte
-      // SearchResultDone should be followed by proper LDAP length encoding
-      console.log(`\nDEBUG: Scanning for SearchResultDone (0x65) in ${response.length} byte response...`);
-      
-        for (let i = response.length - 1; i >= 0; i--) {
+      for (let i = response.length - 1; i >= 0; i--) {
         if (response[i] === 0x65) {
-          console.log(`\n=== Analyzing 0x65 at position ${i} ===`);
           
           // Validate this is a real LDAP SearchResultDone, not ASCII text
           
           // Check if we have enough bytes after 0x65 for length + result code
           if (i + 2 >= response.length) {
-            console.log(`REJECT: Insufficient bytes for LDAP message (need ${i + 2}, have ${response.length})`);
             continue; // Not enough bytes for a minimal LDAP message
           }
           
           // Parse the BER length field properly
           const lengthInfo = parseBerLength(response, i + 1);
           if (!lengthInfo) {
-            console.log(`REJECT: Invalid BER length encoding at position ${i + 1}, byte = 0x${toHexSearch(response[i + 1])}`);
-            continue; // Not a valid BER length, likely ASCII text
+            continue;
           }
-          console.log(`PASS: Valid BER length = ${lengthInfo.length} (${lengthInfo.bytesUsed} bytes used)`);
           
-          // Critical: Validate BER length doesn't exceed available bytes
+          // Validate BER length doesn't exceed available bytes
           const availableBytes = response.length - i;
-          const totalMessageSize = 1 + lengthInfo.bytesUsed + lengthInfo.length; // tag + length field + content
+          const totalMessageSize = 1 + lengthInfo.bytesUsed + lengthInfo.length;
           if (totalMessageSize > availableBytes) {
-            console.log(`REJECT: BER length ${lengthInfo.length} exceeds available bytes (need ${totalMessageSize}, have ${availableBytes})`);
-            continue; // BER length is impossible, definitely ASCII text
-          }
-          console.log(`PASS: BER boundary check (need ${totalMessageSize}, have ${availableBytes})`);
-          
-          // Check if we have enough bytes for the result code
-          const resultCodePos = i + 1 + lengthInfo.bytesUsed;
-          if (resultCodePos >= response.length) {
-            console.log(`REJECT: Insufficient bytes for result code (need position ${resultCodePos}, have ${response.length})`);
-            continue; // Not enough bytes for result code
-          }
-          console.log(`PASS: Result code position ${resultCodePos} is available`);
-          
-          // Enhanced ASCII text detection: check for text patterns around this position
-          const textCheckStart = Math.max(0, i - 5);
-          const textCheckEnd = Math.min(response.length, i + 8);
-          let asciiCount = 0;
-          let textPatterns = 0;
-          
-          for (let j = textCheckStart; j < textCheckEnd; j++) {
-            const byte = response[j];
-            // Count printable ASCII characters
-            if (byte >= 32 && byte <= 126) asciiCount++;
-            // Check for common LDAP DN text patterns
-            if (byte === 0x2c || byte === 0x3d || byte === 0x6f) textPatterns++; // comma, equals, 'o'
+            continue;
           }
           
-          const contextLength = textCheckEnd - textCheckStart;
-          const asciiRatio = asciiCount / contextLength;
-          
-          // Check if this is pure ASCII text vs legitimate LDAP protocol data
-          // Only reject if it's clearly in the middle of ASCII text AND far from LDAP structure
-          let nearestSequence = 999;
-          for (let seq = 1; seq <= Math.min(20, i); seq++) {
-            if (response[i - seq] === 0x30) {
-              nearestSequence = seq;
-              break;
-            }
-          }
-          
-          const isInLdapStructure = nearestSequence <= 10; // Within 10 bytes of a SEQUENCE
-          
-          // ASCII text analysis
-          console.log(`ASCII analysis: ${Math.round(asciiRatio*100)}% ASCII (${asciiCount}/${contextLength}), ${textPatterns} text patterns, ${nearestSequence} bytes from SEQUENCE`);
-          
-          // Only reject ASCII if it's both >80% ASCII AND far from LDAP structure
-          if (asciiRatio > 0.8 && textPatterns >= 2 && !isInLdapStructure) {
-            console.log(`REJECT: High ASCII ratio (${Math.round(asciiRatio*100)}%) with ${textPatterns} text patterns and far from SEQUENCE (${nearestSequence} bytes)`);
-            continue; // This is pure ASCII text, not LDAP protocol data
-          }
-          console.log(`PASS: ASCII analysis (acceptable ratio or within LDAP structure)`);
-          
-          // Additional validation: check if this 0x65 is preceded by reasonable LDAP structure
-          // Look for SEQUENCE (0x30) somewhere before this position
-          let foundSequenceBefore = false;
+          // Check for SEQUENCE before this position (basic LDAP structure validation)
+          let foundSequence = false;
           for (let j = Math.max(0, i - 20); j < i; j++) {
             if (response[j] === 0x30) {
-              foundSequenceBefore = true;
+              foundSequence = true;
               break;
             }
           }
           
-          if (!foundSequenceBefore) {
-            console.log(`REJECT: No SEQUENCE (0x30) found in preceding 20 bytes`);
-            continue; // No LDAP message structure found before this 0x65
+          if (foundSequence) {
+            return i;
           }
-          console.log(`PASS: SEQUENCE found in preceding bytes`);
-          
-          console.log(`Found valid SearchResultDone (0x65) at position ${i} with proper LDAP context`);
-          console.log(`  BER length: ${lengthInfo.length} bytes (${lengthInfo.bytesUsed} octets used)`);
-          console.log(`  Result code position: ${resultCodePos}`);
-          
-          // Show context around this SearchResultDone for verification
-          const contextStart = Math.max(0, i - 10);
-          const contextEnd = Math.min(response.length, resultCodePos + 5);
-          console.log(`  Context hex dump (positions ${contextStart}-${contextEnd-1}):`);
-          for (let j = contextStart; j < contextEnd; j++) {
-            const byte = response[j];
-            const ascii = (byte >= 32 && byte <= 126) ? String.fromCharCode(byte) : '.';
-            let marker = '';
-            if (j === i) marker = ' <-- SearchResultDone';
-            else if (j === i + 1) marker = ' <-- BER length';
-            else if (j === resultCodePos) marker = ' <-- Result code';
-            console.log(`    [${j}] = 0x${toHexSearch(byte)} (${byte}) '${ascii}'${marker}`);
-          }
-          
-          return { index: i, debugInfo: null }; // This looks like a real LDAP SearchResultDone
         }
       }
       
-      console.log('\n=== FINAL RESULT ===');
-      console.log('No valid SearchResultDone found in LDAP message context after checking all 0x65 positions');
-      
-      // Collect debugging info for error message since console.log may not be visible
-      const debugSummary = [];
-      debugSummary.push(`SEARCHRESULTDONE VALIDATION SUMMARY:`);
-      debugSummary.push(`Total response length: ${response.length} bytes`);
-      
-      // Re-analyze each 0x65 position with brief summary for error message
-      const found65Positions = [];
-      for (let i = 0; i < response.length; i++) {
-        if (response[i] === 0x65) found65Positions.push(i);
-      }
-      
-      debugSummary.push(`Found 0x65 at positions: ${found65Positions.join(', ')}`);
-      
-      for (const pos of found65Positions) {
-        debugSummary.push(`Position ${pos}:`);
-        
-        // Quick validation summary
-        if (pos + 2 >= response.length) {
-          debugSummary.push(`  REJECT: Insufficient bytes`);
-          continue;
-        }
-        
-        const lengthInfo = parseBerLength(response, pos + 1);
-        if (!lengthInfo) {
-          debugSummary.push(`  REJECT: Invalid BER (byte=${response[pos + 1]})`);
-          continue;
-        }
-        
-        const availableBytes = response.length - pos;
-        const totalMessageSize = 1 + lengthInfo.bytesUsed + lengthInfo.length;
-        if (totalMessageSize > availableBytes) {
-          debugSummary.push(`  REJECT: BER boundary (need ${totalMessageSize}, have ${availableBytes})`);
-          continue;
-        }
-        
-        // ASCII analysis
-        const contextStart = Math.max(0, pos - 5);
-        const contextEnd = Math.min(response.length, pos + 8);
-        let asciiCount = 0;
-        let textPatterns = 0;
-        for (let j = contextStart; j < contextEnd; j++) {
-          if (response[j] >= 32 && response[j] <= 126) asciiCount++;
-          if (response[j] === 0x2c || response[j] === 0x3d || response[j] === 0x6f) textPatterns++;
-        }
-        const asciiRatio = asciiCount / (contextEnd - contextStart);
-        
-        let nearestSequence = 999;
-        for (let seq = 1; seq <= Math.min(20, pos); seq++) {
-          if (response[pos - seq] === 0x30) {
-            nearestSequence = seq;
-            break;
-          }
-        }
-        
-        const isInLdapStructure = nearestSequence <= 10;
-        if (asciiRatio > 0.8 && textPatterns >= 2 && !isInLdapStructure) {
-          debugSummary.push(`  REJECT: ASCII text (${Math.round(asciiRatio*100)}% ASCII, ${textPatterns} patterns, ${nearestSequence}b from SEQ)`);
-          continue;
-        }
-        
-        let foundSequenceBefore = false;
-        for (let j = Math.max(0, pos - 20); j < pos; j++) {
-          if (response[j] === 0x30) {
-            foundSequenceBefore = true;
-            break;
-          }
-        }
-        
-        if (!foundSequenceBefore) {
-          debugSummary.push(`  REJECT: No SEQUENCE in preceding 20 bytes`);
-          continue;
-        }
-        
-        debugSummary.push(`  ACCEPT: Should be valid! (This shouldn't happen)`);
-      }
-      
-      // Return both index and debug info
-      return { index: -1, debugInfo: debugSummary.join('\n') };
+      return -1;
     } catch (error) {
-      console.log(`Error in findSearchDoneIndex: ${error.message}`);
-      return { index: -1, debugInfo: `Error in findSearchDoneIndex: ${error.message}` };
+      return -1;
     }
   };
   /* --------------------------------------------------------------------- */
@@ -771,8 +506,8 @@ async function runTest() {
 
   /* Retry loop for transient failures */
   while (attempt <= maxRetries) {
-    const connectMarkerName = `connect-${attempt}`;
-    markers.start(`retry-${attempt}`);
+    const connectMarkerName = port === 636 ? 'ldaps-ssl-handshake' : 'ldap-tcp-connect';
+    markers.start(`ldap-attempt-${attempt + 1}`);
     let connectMarkerStarted = false;
     try {
       /* 1 ▸ open socket (TLS if port 636) */
@@ -815,23 +550,19 @@ async function runTest() {
               throw new Error('No valid certificates found in decoded PEM data');
             }
             
-            console.log(`Found ${certificates.length} certificate(s) in decoded data`);
-            
             // Convert each certificate to Buffer
-            const caBuffers = certificates.map((cert, index) => {
-              const trimmedCert = cert.trim();
-              console.log(`Certificate ${index + 1}: ${trimmedCert.length} chars`);
-              return Buffer.from(trimmedCert, 'utf8');
-            });
-            
+            const caBuffers = certificates.map(cert => Buffer.from(cert.trim(), 'utf8'));
             tlsOptions.ca = caBuffers;
-            console.log(`Using ${caBuffers.length} custom CA certificate(s) for LDAPS connection`);
+            
+            if (debugMode) {
+              console.log(`Debug: Using ${caBuffers.length} custom CA certificate(s) for LDAPS connection`);
+            }
             
           } catch (caError) {
             throw new Error(`CA certificate processing failed: ${caError.message}`);
           }
-        } else {
-          console.log('Warning: Using system CA certificates - may fail with self-signed certificates');
+        } else if (debugMode) {
+          console.log('Debug: Using system CA certificates');
         }
         
         connectPromise = net.connectTls(port, host, tlsOptions);
@@ -848,7 +579,7 @@ async function runTest() {
       }
       
       sock = socketResult;
-      sock.setTimeout(effectiveTimeoutMs);
+      sock.setTimeout(timeoutMs);
       metrics.connectionEnd = Date.now();
       markers.stop(connectMarkerName);
       connectMarkerStarted = false;
@@ -859,32 +590,32 @@ async function runTest() {
       }
 
       // Connection successful (details in final summary)
-      markers.stop(`retry-${attempt}`);
+      markers.stop(`ldap-attempt-${attempt + 1}`);
       break; // Success, exit retry loop
     } catch (err) {
       if (connectMarkerStarted) {
         markers.stop(connectMarkerName);
       }
-      markers.stop(`retry-${attempt}`);
+      markers.stop(`ldap-attempt-${attempt + 1}`);
       
       // Enhanced error logging for certificate issues
       const errorMsg = err && err.message || 'Unknown error';
-      if (errorMsg.includes('certificate') || errorMsg.includes('CERT_') || errorMsg.includes('SSL') || errorMsg.includes('TLS')) {
-        console.log(`Certificate/TLS error on attempt ${attempt + 1}: ${errorMsg}`);
+      if (isTlsError(errorMsg)) {
+        console.log(`Certificate/TLS error on attempt ${attempt + 1}`);
         if (!caBase64 && port === 636) {
           console.log('Hint: Consider providing ldapCaBase64 credential for self-signed certificates');
         }
       } else {
-        console.log(`Connection attempt ${attempt + 1} failed: ${errorMsg}`);
+        console.log(`Connection attempt ${attempt + 1} failed`);
       }
       
       attempt++;
       if (attempt > maxRetries) {
         // Provide more specific error message for certificate issues
-        if (errorMsg.includes('certificate') || errorMsg.includes('CERT_') || errorMsg.includes('SSL') || errorMsg.includes('TLS')) {
-          throw new Error(`TLS/Certificate validation failed after ${maxRetries + 1} attempts: ${errorMsg}. ${!caBase64 && port === 636 ? 'Consider providing ldapCaBase64 credential (base64-encoded) for self-signed certificates.' : ''}`);
-      }
-        throw new Error(`Connection failed after ${maxRetries + 1} attempts: ${errorMsg}`);
+        if (isTlsError(errorMsg)) {
+          throw new Error(`TLS/Certificate validation failed after ${maxRetries + 1} attempts. ${!caBase64 && port === 636 ? 'Consider providing ldapCaBase64 credential (base64-encoded) for self-signed certificates.' : ''}`);
+        }
+        throw new Error(`Connection failed after ${maxRetries + 1} attempts`);
       }
       
       // Use defensive delay mechanism
@@ -927,7 +658,7 @@ async function runTest() {
 
     let bindRTT;
     metrics.bindStart = Date.now();
-    markers.start('bind');
+    markers.start('ldap-bind');
     try {
       // Defensive check for socket methods
       if (!sock || typeof sock.writeAll !== 'function' || typeof sock.read !== 'function') {
@@ -935,7 +666,7 @@ async function runTest() {
       }
       
       if (debugMode) {
-        console.log(`Debug: Sending bind request (${bindReq.length} bytes) for ${bindDN}`);
+        console.log(`Debug: Sending bind request (${bindReq.length} bytes)`);
       }
       await sock.writeAll(bindReq);
       const bindRsp = await sock.read();
@@ -957,13 +688,12 @@ async function runTest() {
       
       // Simplified bind response validation
       if (debugMode && bindRsp.length > 0) {
-        const toHex = (num) => num.toString(16).padStart(2, '0');
         console.log(`Debug: Bind response structure - [0]=0x${toHex(bindRsp[0])}, [8]=0x${toHex(bindRsp[8] || 0)}`);
       }
 
       // Check for LDAP message structure: 0x30 (SEQUENCE) at start
       if (bindRsp.length > 0 && bindRsp[0] !== 0x30) {
-        throw new Error(`Bind failed: Invalid LDAP message format - expected SEQUENCE (0x30), got 0x${Number(bindRsp[0]).toString(16)}`);
+        throw new Error(`Bind failed: Invalid LDAP message format - expected SEQUENCE (0x30), got 0x${toHex(bindRsp[0])}`);
       }
 
       // Look for BindResponse (0x61) - might be at different position depending on message structure
@@ -1013,7 +743,7 @@ async function runTest() {
       
       // Bind success logged above
     } finally {
-      markers.stop('bind');
+      markers.stop('ldap-bind');
     }
     
     // Check if bind-only mode is enabled
@@ -1032,12 +762,12 @@ async function runTest() {
     const timeLimit = 5; // 5 seconds
     
     if (debugMode) {
-      console.log(`Debug: Search strategy - base scope on bind DN`);
-      console.log(`Debug: Base DN: '${searchBaseDN}', Filter: '${searchFilter}'`);
+      console.log('Debug: Search strategy - base scope on bind DN');
+      console.log(`Debug: Filter: '${searchFilter}'`);
     }
     
     const searchReqBody = Buffer.concat([
-      str(searchBaseDN),                     // baseObject - the bind DN
+      str(bindDN),                           // baseObject - the bind DN
       int(searchScope),                      // scope: 0 = base (exact DN only)
       int(0),                               // derefAliases: 0 = never
       Buffer.from([0x02, 0x01, sizeLimit]), // sizeLimit: 1
@@ -1060,11 +790,11 @@ async function runTest() {
     );
 
     metrics.searchStart = Date.now();
-    markers.start('search');
+    markers.start('ldap-search');
     let searchRsp;
     try {
       if (debugMode) {
-        console.log(`Debug: Sending search request (${searchReq.length} bytes) to '${searchBaseDN}'`);
+        console.log(`Debug: Sending search request (${searchReq.length} bytes)`);
       }
       
       await sock.writeAll(searchReq);
@@ -1091,24 +821,21 @@ async function runTest() {
         // Check if we have enough data to contain a complete LDAP response
         if (totalBytesRead > 10) {
           const combinedData = safeBufferConcat(searchChunks);
-          if (combinedData) {
-            const doneResult = findSearchDoneIndex(combinedData);
-            if (doneResult.index !== -1) {
-              // Found valid SearchResultDone, we have complete response
-              break;
-            }
+          if (combinedData && findSearchDoneIndex(combinedData) !== -1) {
+            // Found valid SearchResultDone, we have complete response
+            break;
           }
         }
         
         // Safety limit to prevent infinite reading
-        if (totalBytesRead > 1000000) { // 1MB limit
+        if (totalBytesRead > MAX_RESPONSE_SIZE) {
           throw new Error('Search response too large - possible protocol error');
         }
       }
       metrics.searchEnd = Date.now();
       searchRsp = safeBufferConcat(searchChunks);
     } finally {
-      markers.stop('search');
+      markers.stop('ldap-search');
     }
 
     const searchRTT = metrics.searchEnd - metrics.searchStart;
@@ -1128,21 +855,21 @@ async function runTest() {
     
     // Basic response validation
     if (debugMode && searchRsp.length > 8) {
-      console.log(`Debug: Search response type at [8]: 0x${toHexSearch(searchRsp[8])} (${searchRsp[8]})`);
+      console.log(`Debug: Search response type at [8]: 0x${toHex(searchRsp[8])} (${searchRsp[8]})`);
     }
     
     // Check for LDAP message structure: 0x30 (SEQUENCE) at start
     if (searchRsp.length > 0 && searchRsp[0] !== 0x30) {
-      throw new Error(`Search failed: Invalid LDAP message format - expected SEQUENCE (0x30), got 0x${toHexSearch(searchRsp[0])}`);
+      throw new Error(`Search failed: Invalid LDAP message format - expected SEQUENCE (0x30), got 0x${toHex(searchRsp[0])}`);
     }
     
     // Simplified search response validation
     if (searchRsp.length > 8) {
       const responseType = searchRsp[8];
       
-          if (debugMode) {
-      console.log(`Debug: Search response type: 0x${toHexSearch(responseType)} (${searchRsp.length} bytes)`);
-    }
+      if (debugMode) {
+        console.log(`Debug: Search response type: 0x${toHex(responseType)} (${searchRsp.length} bytes)`);
+      }
       
       // Handle main response types
       if (responseType === 0x65) {
@@ -1163,21 +890,16 @@ async function runTest() {
               if (resultCodePos < searchRsp.length) {
                 const resultCode = searchRsp[resultCodePos];
                                 if (resultCode === 0x00) {
-                  foundSearchResultDone = true;
-              break;
-        } else {
-                  // Check for ThousandEyes ASCII corruption
-                  const isAsciiChar = resultCode >= 32 && resultCode <= 126;
-                  if (isAsciiChar) {
-                    // Proxy corruption but search might have succeeded
-                    console.log(`ThousandEyes Environment: LDAP response corrupted, treating as success since bind worked`);
                     foundSearchResultDone = true;
-            break;
-        } else {
+                    break;
+                  } else if (isProxyCorruption(resultCode)) {
+                    console.log('ThousandEyes Environment: LDAP response corrupted, treating as success');
+                    foundSearchResultDone = true;
+                    break;
+                  } else {
                     const errorMsg = getLdapErrorMessage(resultCode);
                     throw new Error(`Search failed: ${errorMsg}`);
                   }
-                }
               }
             }
           }
@@ -1185,7 +907,7 @@ async function runTest() {
         
         // RHDS specific - treat as success if bind worked (fallback for RHDS format)
         if (!foundSearchResultDone && debugMode) {
-          console.log(`Debug: 0x82 response - treating as RHDS success`);
+          console.log('Debug: 0x82 response - treating as RHDS success');
         }
         
         // Complete successfully for 0x82 responses
@@ -1213,20 +935,18 @@ async function runTest() {
         } else if (responseType === 0x01) {
           throw new Error(`Search failed: Operations error`);
             } else {
-          throw new Error(`Search failed: Unexpected response type 0x${toHexSearch(responseType)}`);
+          throw new Error(`Search failed: Unexpected response type 0x${toHex(responseType)}`);
         }
 
 
       }
     }
 
-    const doneResult = findSearchDoneIndex(searchRsp);
-    const doneIndex = doneResult.index;
-    const searchRspLength = searchRsp && searchRsp.length ? searchRsp.length : 0;
+    const doneIndex = findSearchDoneIndex(searchRsp);
     
     // SearchResultDone analysis (silent unless debug mode)
     if (debugMode) {
-      console.log(`Debug: SearchResultDone analysis - length: ${searchRspLength}, index: ${doneIndex}`);
+      console.log(`Debug: SearchResultDone analysis - length: ${searchRsp.length}, index: ${doneIndex}`);
     }
     
     if (doneIndex === -1) {
@@ -1240,35 +960,23 @@ async function runTest() {
           if (searchRsp.length > directResultCodePos) {
             const directResultCode = searchRsp[directResultCodePos];
             if (debugMode) {
-              console.log(`Debug: Direct result code: 0x${toHexSearch(directResultCode)} (${directResultCode})`);
+              console.log(`Debug: Direct result code: 0x${toHex(directResultCode)} (${directResultCode})`);
             }
             if (directResultCode !== 0x00) {
-              // Check for ThousandEyes ASCII corruption
-              const isAsciiChar = directResultCode >= 32 && directResultCode <= 126;
-              if (isAsciiChar) {
-                console.log(`ThousandEyes Environment: Direct result corrupted, treating as success since bind worked`);
-                const totalTime = metrics.searchEnd - metrics.connectionStart;
-                const connectionTime = metrics.connectionEnd - metrics.connectionStart;
-                console.log(`LDAP Monitor: PASS (Proxy-Limited) - Total ${totalTime}ms (connect: ${connectionTime}ms, bind: ${bindRTT}ms, search: ${searchRTT}ms)`);
-                return; // Treat as success
+              if (isProxyCorruption(directResultCode)) {
+                reportProxySuccess(metrics, bindRTT, searchRTT);
+                return;
               } else {
-              const errorMsg = getLdapErrorMessage(directResultCode);
-              throw new Error(`Search failed: ${errorMsg}`);
-            }
+                const errorMsg = getLdapErrorMessage(directResultCode);
+                throw new Error(`Search failed: ${errorMsg}`);
+              }
             }
           }
         }
-          } else {
+      } else {
         throw new Error(`Search failed: No valid SearchResultDone found in response`);
       }
     } else {
-      // Parse BER length to determine minimum required bytes
-      const truncationLengthInfo = parseBerLength(searchRsp, doneIndex + 1);
-      const minRequiredPos = truncationLengthInfo ? (doneIndex + 1 + truncationLengthInfo.bytesUsed) : (doneIndex + 4);
-      
-      if (minRequiredPos >= searchRspLength) {
-        throw new Error(`Search failed: Incomplete SearchResultDone message`);
-      }
       // Parse BER length to find correct result code position
       const resultLengthInfo = parseBerLength(searchRsp, doneIndex + 1);
       if (!resultLengthInfo) {
@@ -1276,30 +984,20 @@ async function runTest() {
       }
       
       const resultCodePos = doneIndex + 1 + resultLengthInfo.bytesUsed;
-      if (resultCodePos >= searchRspLength) {
-        throw new Error(`Search failed: Result code position ${resultCodePos} exceeds response length ${searchRspLength}`);
+      if (resultCodePos >= searchRsp.length) {
+        throw new Error(`Search failed: Result code position ${resultCodePos} exceeds response length ${searchRsp.length}`);
       }
       
       const searchResultCode = searchRsp[resultCodePos];
       
       if (debugMode) {
-        console.log(`Debug: Search result code: 0x${toHexSearch(searchResultCode)} (${searchResultCode})`);
+        console.log(`Debug: Search result code: 0x${toHex(searchResultCode)} (${searchResultCode})`);
       }
     if (searchResultCode !== 0x00) {
-        // Check if this is a ThousandEyes environment limitation
-        // (ASCII characters instead of binary LDAP data)
-        const isAsciiChar = searchResultCode >= 32 && searchResultCode <= 126;
-        const asciiChar = isAsciiChar ? String.fromCharCode(searchResultCode) : null;
-        
-        if (isAsciiChar) {
-          // ThousandEyes proxy corruption detected - but bind succeeded, so treat as success
-          console.log(`ThousandEyes Environment: LDAP response corrupted (ASCII '${asciiChar}' instead of binary), but bind succeeded - treating as PASS`);
-          const totalTime = metrics.searchEnd - metrics.connectionStart;
-          const connectionTime = metrics.connectionEnd - metrics.connectionStart;
-          console.log(`LDAP Monitor: PASS (Proxy-Limited) - Total ${totalTime}ms (connect: ${connectionTime}ms, bind: ${bindRTT}ms, search: ${searchRTT}ms)`);
-          return; // Treat as success
+        if (isProxyCorruption(searchResultCode)) {
+          reportProxySuccess(metrics, bindRTT, searchRTT);
+          return;
         } else {
-          // Real LDAP error
           const errorMsg = getLdapErrorMessage(searchResultCode);
           throw new Error(`Search failed: ${errorMsg}`);
         }
