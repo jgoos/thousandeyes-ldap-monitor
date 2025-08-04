@@ -10,3 +10,14 @@
       4. Keep the additional code under 1 KB to respect the overall character budget.
   status: done
 
+- id: 5
+  name: "Improve Proxy Corruption Detection Heuristic"
+  context: |
+    `isProxyCorruption` currently flags any printable ASCII byte (0x20–0x7E) as corruption. This is too broad and may mis-classify valid bytes.
+  prompt: |-
+    Refine `isProxyCorruption(resultCode)` to:
+    1. Only treat sequences of ≥3 printable ASCII bytes immediately following a valid LDAP TLV as corruption.
+    2. Reject single printable codes that match known LDAP error codes.
+    3. Keep the function small and compatible with ThousandEyes JS.
+  status: done
+

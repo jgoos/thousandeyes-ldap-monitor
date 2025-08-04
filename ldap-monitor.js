@@ -259,8 +259,18 @@ async function runTest() {
   };
 
   // Check for ThousandEyes ASCII corruption and handle appropriately
-  const isProxyCorruption = (resultCode) => {
-    return resultCode >= 32 && resultCode <= 126;
+  const isProxyCorruption = (resultCode, buf, idx) => {
+    if (!buf || idx == null || LDAP_RESULT_CODES[resultCode]) return false;
+    let count = 0;
+    for (let i = idx; i < buf.length && count < 3; i++) {
+      const b = buf[i];
+      if (b >= 0x20 && b <= 0x7e) {
+        count++;
+      } else {
+        break;
+      }
+    }
+    return count >= 3;
   };
   /* ---------------------------------------------------------------- */
 
@@ -912,7 +922,7 @@ async function runTest() {
                                 if (resultCode === 0x00) {
                     foundSearchResultDone = true;
                     break;
-                  } else if (isProxyCorruption(resultCode)) {
+                  } else if (isProxyCorruption(resultCode, searchRsp, resultCodePos)) {
                     console.log('ThousandEyes Environment: LDAP response corrupted, treating as success');
                     foundSearchResultDone = true;
                     break;
@@ -983,7 +993,7 @@ async function runTest() {
               console.log(`Debug: Direct result code: 0x${toHex(directResultCode)} (${directResultCode})`);
             }
             if (directResultCode !== 0x00) {
-              if (isProxyCorruption(directResultCode)) {
+              if (isProxyCorruption(directResultCode, searchRsp, directResultCodePos)) {
                 reportProxySuccess(metrics, bindRTT, searchRTT);
                 return;
               } else {
@@ -1014,7 +1024,7 @@ async function runTest() {
         console.log(`Debug: Search result code: 0x${toHex(searchResultCode)} (${searchResultCode})`);
       }
     if (searchResultCode !== 0x00) {
-        if (isProxyCorruption(searchResultCode)) {
+        if (isProxyCorruption(searchResultCode, searchRsp, resultCodePos)) {
           reportProxySuccess(metrics, bindRTT, searchRTT);
           return;
         } else {
