@@ -849,12 +849,20 @@ async function runTest() {
     if (debugMode && searchRsp.length > 8) {
       console.log(`Debug: Search response type at [8]: 0x${toHex(searchRsp[8])} (${searchRsp[8]})`);
     }
-    
+
     // Check for LDAP message structure: 0x30 (SEQUENCE) at start
     if (searchRsp.length > 0 && searchRsp[0] !== 0x30) {
       throw new Error(`Search failed: Invalid LDAP message format - expected SEQUENCE (0x30), got 0x${toHex(searchRsp[0])}`);
     }
-    
+    const top = parseBerLength(searchRsp, 1);
+    if (!top) throw new Error('Search failed: Invalid top-level length');
+    const end = 1 + top.bytesUsed + top.length;
+    if (end > searchRsp.length) {
+      throw new Error(`Search failed: Top-level length ${end} exceeds response size ${searchRsp.length}`);
+    } else if (end !== searchRsp.length && debugMode) {
+      console.log(`Debug: Extra data after LDAP message: ${searchRsp.length - end} bytes`);
+    }
+
     // Simplified search response validation
     if (searchRsp.length > 8) {
       const responseType = searchRsp[8];
