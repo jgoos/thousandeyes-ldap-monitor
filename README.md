@@ -34,17 +34,50 @@ Follow these steps to configure LDAP monitoring in ThousandEyes:
 
 **Navigation:** `Settings ▸ Secure Credentials ▸ Add Credential`
 
-Create two secure credential entries:
+#### Required Credentials
 
-**First Credential:**
+Create these secure credential entries:
+
+**LDAP Bind User:**
 - **Name:** `ldapMonUser`
 - **Value:** Paste the full bind DN (e.g., `cn=monitor,ou=svc,dc=example,dc=com`)
 - **Agent Access:** Tick the Enterprise (and/or Cloud) Agents that will run the test
 
-**Second Credential:**
+**LDAP Bind Password:**
 - **Name:** `ldapMonPass`
 - **Value:** Paste the account's password
 - **Agent Access:** Tick the same agents selected for ldapMonUser
+
+**CA Certificate (LDAPS only):**
+- **Name:** `ldapCaBase64`
+- **Value:** Base64-encoded CA certificate(s) for LDAPS connections with self-signed or custom certificates
+- **Agent Access:** Tick the same agents (only needed if using custom certificates with LDAPS)
+- **Note:** Leave empty or omit if using system CA certificates
+
+#### Optional Configuration Credentials
+
+These credentials can override the default values:
+
+**LDAP Server Hostname:**
+- **Name:** `ldapHost`
+- **Value:** LDAP server hostname or IP address (default: `ldap.example.com`)
+
+**LDAP Server Port:**
+- **Name:** `ldapPort`
+- **Value:** LDAP server port number (default: `636` for LDAPS, use `389` for LDAP)
+
+**Base DN for Search:**
+- **Name:** `ldapBaseDN` (or alternatives: `ldapbasedn`, `LdapBaseDN`, `LDAPBASEDN`, `ldap_base_dn`, `LDAP_BASE_DN`)
+- **Value:** Base DN for search operations (default: uses bind DN for base scope search)
+- **Note:** Leave empty to search Root DSE
+
+**Debug Mode:**
+- **Name:** `ldapDebugMode`
+- **Value:** Set to `true` for verbose debugging output (default: `false`)
+
+**Bind-Only Mode:**
+- **Name:** `ldapBindOnly`
+- **Value:** Set to `true`, `1`, or `yes` to skip search operations and only test bind (default: `false`)
 
 > **Security Note:** Secure Credential entries are encrypted at rest and never appear in screenshots, reports, or API payloads.
 
@@ -67,8 +100,11 @@ In the Steps panel:
 
 In the Script editor:
 1. Click the key icon above the editor
-2. Tick `ldapMonUser` and `ldapMonPass` to allow `credentials.get()` to access them at runtime
-3. No plaintext credentials will ever appear in the script
+2. Tick all credentials you've configured:
+   - **Required:** `ldapMonUser` and `ldapMonPass`
+   - **Optional:** `ldapCaBase64`, `ldapHost`, `ldapPort`, `ldapBaseDN`, `ldapDebugMode`, `ldapBindOnly`
+3. Only select credentials you've actually created - the script will use defaults for missing optional credentials
+4. No plaintext credentials will ever appear in the script
 
 ### 5. Select Agents and Monitoring Frequency
 
@@ -99,25 +135,27 @@ Click `Create New Test` - data starts flowing immediately.
 
 ## Script Configuration
 
-The script includes user-tunable settings at the top:
+The script uses **Secure Credentials** for all configuration instead of hardcoded values. This provides better security and easier management across multiple tests.
 
-```javascript
-const host      = 'ldap.example.com';  // FQDN or IP
-const port      = 636;                 // 389 = LDAP, 636 = LDAPS
-const cfg = {
-  host: 'ldap.example.com',
-  port: 636,
-  timeoutMs: 5000,
-  slowMs: 300,
-  baseDN: '',
-  filterAttr: 'objectClass',
-  retryDelayMs: 100,
-  maxRetries: 2,
-  tlsMinVersion: 'TLSv1.2'
-};
-```
+### Configuration Method
 
-Modify these values according to your LDAP server configuration before deploying.
+All settings are configured through ThousandEyes Secure Credentials:
+- **Required credentials** must be configured for the script to work
+- **Optional credentials** override built-in defaults when provided
+- Missing optional credentials will use sensible defaults
+
+### Default Values
+
+When optional credentials are not provided, the script uses these defaults:
+- **Host:** `ldap.example.com` (override with `ldapHost` credential)
+- **Port:** `636` for LDAPS (override with `ldapPort` credential)
+- **Timeout:** Test timeout from ThousandEyes (typically 5000ms)
+- **Slow threshold:** `300ms` for both bind and search operations
+- **Base DN:** Uses bind DN for base scope search (override with `ldapBaseDN` credential)
+- **Retry attempts:** 2 with 100ms delay between attempts
+- **TLS version:** Minimum TLSv1.2 for LDAPS connections
+- **Debug mode:** Disabled (enable with `ldapDebugMode=true` credential)
+- **Bind-only mode:** Disabled (enable with `ldapBindOnly=true` credential)
 
 ## Monitoring Output
 
@@ -141,22 +179,34 @@ The script will throw errors (causing test failure) if:
 ### Common Error Messages and Solutions
 
 #### "Missing credentials: Ensure ldapMonUser and ldapMonPass are configured"
-**Cause:** The secure credentials are not properly configured or not accessible to the agent.
+**Cause:** The required secure credentials are not properly configured or not accessible to the agent.
 
 **Solution:**
 1. Verify credentials exist in `Settings ▸ Secure Credentials`
-2. Ensure the agent running the test has access to both credentials
+2. Ensure the agent running the test has access to both required credentials
 3. Check that credential names match exactly: `ldapMonUser` and `ldapMonPass`
+4. Verify credential access is enabled in the script editor (key icon)
+5. For LDAPS with custom certificates, ensure `ldapCaBase64` credential is properly configured
 
 #### "Connection failed after X attempts"
 **Cause:** Network connectivity issues or LDAP server is down.
 
 **Solution:**
-1. Verify the LDAP server hostname/IP and port are correct
+1. Verify the LDAP server hostname/IP and port are correct (use `ldapHost` and `ldapPort` credentials to override defaults)
 2. Check firewall rules between the agent and LDAP server
 3. For LDAPS (port 636), ensure TLS certificates are valid
 4. Test connectivity manually: `telnet ldap.example.com 636`
 5. Verify TLS version compatibility (script requires TLS 1.2 minimum, supports 1.3)
+
+#### "TLS/Certificate validation failed"
+**Cause:** LDAPS certificate validation failed due to self-signed or custom CA certificates.
+
+**Solution:**
+1. For self-signed certificates, configure the `ldapCaBase64` credential with your CA certificate
+2. Convert your CA certificate to base64: `base64 -w 0 ca-certificate.pem`
+3. Store the entire base64 string in the `ldapCaBase64` secure credential
+4. Ensure the certificate chain is complete if using intermediate CAs
+5. Enable debug mode (`ldapDebugMode: true`) to see detailed TLS handshake information
 
 #### "Bind failed: invalidCredentials"
 **Cause:** The bind DN or password is incorrect.
@@ -187,54 +237,110 @@ The script will throw errors (causing test failure) if:
 ### Performance Tuning
 
 #### Adjusting Thresholds
-Different LDAP implementations have different performance characteristics:
+Different LDAP implementations have different performance characteristics. The default 300ms threshold works well for most environments, but you may need to adjust based on your setup:
 
 - **Active Directory**: May require higher thresholds (400-500ms)
-- **OpenLDAP**: Typically faster (100-200ms)
+- **OpenLDAP**: Typically faster (100-200ms)  
 - **Load Balanced setups**: Should have tighter SLAs (150-250ms)
 
 #### Optimizing Search Operations
-- Use Root DSE (`baseDN = ''`) for fastest response times
-- Limit search scope to `base` (already configured)
-- Use simple present filters such as the `objectClass` attribute
+The script automatically optimizes search operations by:
+- Using the bind DN as the search base for maximum compatibility
+- Limiting search scope to `base` (single entry lookup)
+- Using simple present filters (`objectClass=*`)
+- Supporting bind-only mode (`ldapBindOnly: true`) for restrictive environments
+
+#### Troubleshooting with Debug Mode
+Enable detailed logging with the `ldapDebugMode: true` credential to see:
+- Connection establishment details
+- TLS handshake information (cipher, certificates)
+- LDAP request/response timing and parsing
+- BER encoding/decoding operations
+- Vendor-specific response handling
 
 ### Testing Outside ThousandEyes
 
-Before deploying to ThousandEyes, test your LDAP configuration locally:
+Before deploying to ThousandEyes, test your LDAP configuration locally using the same values you'll configure in secure credentials:
 
 ```bash
-# Test LDAP bind (non-TLS)
-ldapsearch -x -H ldap://ldap.example.com:389 \
-  -D "cn=monitor,ou=svc,dc=example,dc=com" \
-  -w "password" \
+# Test LDAP bind (non-TLS) - substitute your actual values
+ldapsearch -x -H ldap://[your-ldapHost]:389 \
+  -D "[your-ldapMonUser]" \
+  -w "[your-ldapMonPass]" \
   -b "" -s base "(objectClass=*)"
 
-# Test LDAPS bind (TLS)
-ldapsearch -x -H ldaps://ldap.example.com:636 \
-  -D "cn=monitor,ou=svc,dc=example,dc=com" \
-  -w "password" \
+# Test LDAPS bind (TLS) - substitute your actual values  
+ldapsearch -x -H ldaps://[your-ldapHost]:636 \
+  -D "[your-ldapMonUser]" \
+  -w "[your-ldapMonPass]" \
   -b "" -s base "(objectClass=*)"
+
+# Test with custom base DN if using ldapBaseDN credential
+ldapsearch -x -H ldaps://[your-ldapHost]:636 \
+  -D "[your-ldapMonUser]" \
+  -w "[your-ldapMonPass]" \
+  -b "[your-ldapBaseDN]" -s base "(objectClass=*)"
 ```
+
+Replace the bracketed placeholders with the actual values you'll store in your secure credentials.
 
 ## Advanced Configuration
 
-### Using the Example Configuration File
+### LDAP Server-Specific Settings
 
-This repository includes `ldap-monitor-config.example.js` with pre-configured templates for common LDAP servers. Since ThousandEyes doesn't support file imports, you'll need to:
+Different LDAP implementations may require specific configurations. Use secure credentials to customize the monitoring for your environment:
 
-1. Open `ldap-monitor-config.example.js` to review example configurations
-2. Copy the relevant settings from the example that matches your LDAP server type
-3. Manually update the configuration values at the top of `ldap-monitor.js`
-4. Paste the modified script into ThousandEyes
-
-For example, if you're monitoring Active Directory, you might update your script settings to:
-```javascript
-const host      = 'dc01.corp.example.com';
-const port      = 636;
-const timeoutMs = 5000;
-const slowMs    = 500;  // AD can be slower
-const baseDN    = 'DC=corp,DC=example,DC=com';
+#### Active Directory
 ```
+ldapHost: dc01.corp.example.com
+ldapPort: 636
+ldapBaseDN: DC=corp,DC=example,DC=com
+ldapCaBase64: <base64-encoded-ca-cert> (if using custom certificates)
+```
+
+#### OpenLDAP
+```
+ldapHost: openldap.example.com
+ldapPort: 636
+ldapBaseDN: dc=example,dc=com
+```
+
+#### Oracle Directory Server / Red Hat Directory Server
+```
+ldapHost: rhds.example.com
+ldapPort: 636
+ldapBaseDN: dc=example,dc=com
+ldapBindOnly: true (recommended for compatibility)
+```
+
+### Special Operating Modes
+
+#### Debug Mode
+Enable verbose debugging output to troubleshoot connectivity issues:
+```
+ldapDebugMode: true
+```
+This will log detailed information about connection attempts, TLS handshakes, and LDAP response parsing.
+
+#### Bind-Only Mode
+For LDAP servers that have restrictive search permissions or non-standard search responses, you can test only the bind operation:
+```
+ldapBindOnly: true
+```
+This mode skips the search operation and reports success after a successful bind, making it compatible with more restrictive LDAP configurations.
+
+### CA Certificate Configuration
+
+For LDAPS connections with self-signed or custom CA certificates, provide the certificate in base64 format:
+
+1. Obtain your CA certificate in PEM format
+2. Convert to base64: `base64 -w 0 ca-certificate.pem`
+3. Store the base64 string in the `ldapCaBase64` credential
+4. The script supports certificate chains (multiple certificates in one PEM file)
+
+### Configuration Examples
+
+Instead of modifying the script code, configure everything through secure credentials. This approach provides better security and easier management across multiple tests.
 
 ### Monitoring Multiple LDAP Servers
 
