@@ -259,8 +259,18 @@ async function runTest() {
   };
 
   // Check for ThousandEyes ASCII corruption and handle appropriately
-  const isProxyCorruption = (resultCode) => {
-    return resultCode >= 32 && resultCode <= 126;
+  const isProxyCorruption = (resultCode, buf, idx) => {
+    if (!buf || idx == null || LDAP_RESULT_CODES[resultCode]) return false;
+    let count = 0;
+    for (let i = idx; i < buf.length && count < 3; i++) {
+      const b = buf[i];
+      if (b >= 0x20 && b <= 0x7e) {
+        count++;
+      } else {
+        break;
+      }
+    }
+    return count >= 3;
   };
   /* ---------------------------------------------------------------- */
 
@@ -866,13 +876,33 @@ async function runTest() {
     }
 
     // Simplified search response validation
+    let firstTagPos = 8;
     if (searchRsp.length > 8) {
-      const responseType = searchRsp[8];
-      
+      let pos = 8;
+      let responseType = searchRsp[pos];
+
+      // Skip SearchResultReference (0x73), intermediateResponse (0x79)
+      // and context-specific tags (0xA0-0xBF)
+      while (
+        responseType === 0x73 ||
+        responseType === 0x79 ||
+        (responseType >= 0xa0 && responseType <= 0xbf)
+      ) {
+        const skipInfo = parseBerLength(searchRsp, pos + 1);
+        if (!skipInfo) break;
+        if (debugMode) {
+          console.log(`Debug: Skipping tag 0x${toHex(responseType)}`);
+        }
+        pos += 1 + skipInfo.bytesUsed + skipInfo.length;
+        if (pos >= searchRsp.length) break;
+        responseType = searchRsp[pos];
+      }
+      firstTagPos = pos;
+
       if (debugMode) {
         console.log(`Debug: Search response type: 0x${toHex(responseType)} (${searchRsp.length} bytes)`);
       }
-      
+
       // Handle main response types
       if (responseType === 0x65) {
         // SearchResultDone - this is what we expect for base scope
@@ -894,7 +924,7 @@ async function runTest() {
                                 if (resultCode === 0x00) {
                     foundSearchResultDone = true;
                     break;
-                  } else if (isProxyCorruption(resultCode)) {
+                  } else if (isProxyCorruption(resultCode, searchRsp, resultCodePos)) {
                     console.log('ThousandEyes Environment: LDAP response corrupted, treating as success');
                     foundSearchResultDone = true;
                     break;
@@ -920,7 +950,7 @@ async function runTest() {
       } else if (responseType === 0x06) {
         // Check for result code in 0x06 response
         let foundResultCode = null;
-        for (let i = 8; i < searchRsp.length && i < 30; i++) {
+        for (let i = firstTagPos; i < searchRsp.length && i < firstTagPos + 22; i++) {
           if (searchRsp[i] === 0x0A && i + 1 < searchRsp.length) {
             foundResultCode = searchRsp[i + 1];
                 break;
@@ -952,20 +982,20 @@ async function runTest() {
     }
     
     if (doneIndex === -1) {
-      // If we didn't find SearchResultDone, but we got SearchResultDone at position 8, handle it
-      if (searchRsp.length > 8 && searchRsp[8] === 0x65) {
-        if (debugMode) console.log('Debug: SearchResultDone found at position 8');
-        
-        const directLengthInfo = parseBerLength(searchRsp, 9);
+      // If SearchResultDone wasn't found, check first tag position
+      if (searchRsp.length > firstTagPos && searchRsp[firstTagPos] === 0x65) {
+        if (debugMode) console.log(`Debug: SearchResultDone found at position ${firstTagPos}`);
+
+        const directLengthInfo = parseBerLength(searchRsp, firstTagPos + 1);
         if (directLengthInfo) {
-          const directResultCodePos = 9 + directLengthInfo.bytesUsed;
+          const directResultCodePos = firstTagPos + 1 + directLengthInfo.bytesUsed;
           if (searchRsp.length > directResultCodePos) {
             const directResultCode = searchRsp[directResultCodePos];
             if (debugMode) {
               console.log(`Debug: Direct result code: 0x${toHex(directResultCode)} (${directResultCode})`);
             }
             if (directResultCode !== 0x00) {
-              if (isProxyCorruption(directResultCode)) {
+              if (isProxyCorruption(directResultCode, searchRsp, directResultCodePos)) {
                 reportProxySuccess(metrics, bindRTT, searchRTT);
                 return;
               } else {
@@ -996,7 +1026,7 @@ async function runTest() {
         console.log(`Debug: Search result code: 0x${toHex(searchResultCode)} (${searchResultCode})`);
       }
     if (searchResultCode !== 0x00) {
-        if (isProxyCorruption(searchResultCode)) {
+        if (isProxyCorruption(searchResultCode, searchRsp, resultCodePos)) {
           reportProxySuccess(metrics, bindRTT, searchRTT);
           return;
         } else {
