@@ -418,30 +418,22 @@ async function runTest() {
   const parseBerLength = (buffer, pos) => {
     try {
       if (!buffer || pos >= buffer.length) return null;
-      
-      const firstByte = buffer[pos];
-      
-      if (firstByte <= 0x7F) {
-        // Short form: length is 0-127, encoded in 1 byte
-        return { length: firstByte, bytesUsed: 1 };
-      } else if (firstByte === 0x80) {
-        // Indefinite form: not allowed in SearchResultDone
+      const first = buffer[pos];
+      let len, hdr;
+      if (first <= 0x7F) {
+        len = first; hdr = 1;
+      } else if (first === 0x80) {
         return null;
       } else {
-        // Long form: first byte is 0x81-0x84 indicating number of length octets
-        const lengthOctets = firstByte & 0x7F;
-        if (lengthOctets > 4 || pos + lengthOctets >= buffer.length) {
-          return null; // Too many octets or not enough bytes
-        }
-        
-        let length = 0;
-        for (let i = 1; i <= lengthOctets; i++) {
-          length = (length << 8) | buffer[pos + i];
-        }
-        
-        return { length: length, bytesUsed: 1 + lengthOctets };
+        const octets = first & 0x7F;
+        if (octets < 1 || octets > 4 || pos + octets >= buffer.length) return null;
+        len = 0; hdr = 1 + octets;
+        for (let i = 1; i <= octets; i++) len = (len << 8) | buffer[pos + i];
       }
-    } catch (error) {
+      return (len + hdr > Number.MAX_SAFE_INTEGER || len + hdr > buffer.length - pos)
+        ? null
+        : { length: len, bytesUsed: hdr };
+    } catch (e) {
       return null;
     }
   };
@@ -812,34 +804,36 @@ async function runTest() {
       const searchChunks = [];
       let totalBytesRead = 0;
       let consecutiveEmptyReads = 0;
-      
+      let expected;
+
       while (true) {
         const chunk = await sock.read();
         if (!chunk || chunk.length === 0) {
           consecutiveEmptyReads++;
-          if (consecutiveEmptyReads >= 3) {
-            // No more data available, process what we have
-            break;
-          }
+          if (consecutiveEmptyReads >= 3) break;
           continue;
         }
-        
+
         consecutiveEmptyReads = 0;
         searchChunks.push(chunk);
         totalBytesRead += chunk.length;
-        
-        // Check if we have enough data to contain a complete LDAP response
-        if (totalBytesRead > 10) {
-          const combinedData = safeBufferConcat(searchChunks);
-          if (combinedData && findSearchDoneIndex(combinedData) !== -1) {
-            // Found valid SearchResultDone, we have complete response
-            break;
-          }
-        }
-        
-        // Safety limit to prevent infinite reading
+
         if (totalBytesRead > MAX_RESPONSE_SIZE) {
           throw new Error('Search response too large - possible protocol error');
+        }
+
+        if (expected === undefined) {
+          expected = 0;
+          const cd = safeBufferConcat(searchChunks);
+          const len = cd && parseBerLength(cd, 1);
+          if (len) expected = 1 + len.bytesUsed + len.length;
+        }
+
+        if (expected) {
+          if (totalBytesRead >= expected) break;
+        } else if (expected === 0 && totalBytesRead > 10) {
+          const cd = safeBufferConcat(searchChunks);
+          if (cd && findSearchDoneIndex(cd) !== -1) break;
         }
       }
       metrics.searchEnd = Date.now();
@@ -867,12 +861,20 @@ async function runTest() {
     if (debugMode && searchRsp.length > 8) {
       console.log(`Debug: Search response type at [8]: 0x${toHex(searchRsp[8])} (${searchRsp[8]})`);
     }
-    
+
     // Check for LDAP message structure: 0x30 (SEQUENCE) at start
     if (searchRsp.length > 0 && searchRsp[0] !== 0x30) {
       throw new Error(`Search failed: Invalid LDAP message format - expected SEQUENCE (0x30), got 0x${toHex(searchRsp[0])}`);
     }
-    
+    const top = parseBerLength(searchRsp, 1);
+    if (!top) throw new Error('Search failed: Invalid top-level length');
+    const end = 1 + top.bytesUsed + top.length;
+    if (end > searchRsp.length) {
+      throw new Error(`Search failed: Top-level length ${end} exceeds response size ${searchRsp.length}`);
+    } else if (end !== searchRsp.length && debugMode) {
+      console.log(`Debug: Extra data after LDAP message: ${searchRsp.length - end} bytes`);
+    }
+
     // Simplified search response validation
     let firstTagPos = 8;
     if (searchRsp.length > 8) {

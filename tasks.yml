@@ -1,23 +1,73 @@
-- id: 4
-  name: "Extend Response Type Handling"
-  context: |
-    The script currently handles 0x65, 0x64, 0x82 and 0x06. LDAP also defines SearchResultReference (0x73) and intermediateResponse. We need graceful handling for those tags.
-  prompt: |-
-    In the section that switches on `responseType = buffer[8]`, add cases to:
-      1. Detect tag 0x73 (SearchResultReference) and skip over its TLV using `parseBerLength`, continuing the scan.
-      2. Detect intermediateResponse (0x79) and treat it as non-fatal (skip).
-      3. For unknown but valid LDAP tags (context-specific 0xA0–0xBF), skip their TLV instead of throwing.
-      4. Keep the additional code under 1 KB to respect the overall character budget.
-  status: done
+---
+tasks:
+  - id: 1
+    name: "Enhance BER Length Parsing Robustness"
+    status: done
+    context: |
+      The parseBerLength(buffer, pos) helper must remain under 100 KB total script size, run in the ThousandEyes JS sandbox (no native sockets, only `Buffer` and `thousandeyes.net`), and reject malformed or malicious length fields.
+    prompt: |-
+      As a junior developer, update the `parseBerLength(buffer, pos)` function to:
+      1. Explicitly reject the indefinite form (0x80).
+      2. Allow only 1–4 length octets (firstByte & 0x7F between 1 and 4).
+      3. Check that `length + headerBytes` does not overflow `Number.MAX_SAFE_INTEGER` or exceed `buffer.length - pos`.
+      4. Return `null` for any invalid or overflowed lengths.
+      5. Keep your changes as compact as possible to stay within the 100 KB script limit.
 
-- id: 5
-  name: "Improve Proxy Corruption Detection Heuristic"
-  context: |
-    `isProxyCorruption` currently flags any printable ASCII byte (0x20–0x7E) as corruption. This is too broad and may mis-classify valid bytes.
-  prompt: |-
-    Refine `isProxyCorruption(resultCode)` to:
-    1. Only treat sequences of ≥3 printable ASCII bytes immediately following a valid LDAP TLV as corruption.
-    2. Reject single printable codes that match known LDAP error codes.
-    3. Keep the function small and compatible with ThousandEyes JS.
-  status: done
+  - id: 2
+    name: "Add Deep LDAP Message Structure Validation"
+    status: done
+    context: |
+      Beyond checking for SEQUENCE (0x30) at offset 0, responses should validate the top-level TLV structure and ensure reported lengths match actual data, without adding external libraries.
+    prompt: |-
+      In the response‐validation section of `runTest()`, enhance the checks to:
+      1. After verifying `buffer[0] === 0x30`, parse its length via `parseBerLength(buffer, 1)`.
+      2. Confirm that `1 + bytesUsed + length === buffer.length` (or ≤ if multiple messages).
+      3. If the top‐level length doesn’t align, throw a clear Error.
+      4. Maintain minimal code size and use only built-in Buffer methods.
+
+  - id: 3
+    name: "Optimize Chunked Response Reading Using BER Length"
+    status: done
+    context: |
+      Currently the script reads chunks until SearchResultDone is detected. We can save memory and CPU by stopping reads once the expected TLV end offset is known.
+    prompt: |-
+      Refactor the `while (await sock.read())` loop to:
+      1. On the first non‐empty read, parse the outer LDAP message length via `parseBerLength(combinedData, 1)`.
+      2. Compute `expectedTotal = 1 + bytesUsed + length`.
+      3. Break the loop when `totalBytesRead >= expectedTotal`, even if SearchResultDone isn’t seen yet.
+      4. Fall back to the original SearchResultDone scan if parsing fails.
+      5. Preserve the 1 MB `MAX_RESPONSE_SIZE` guard and sandbox constraints.
+
+  - id: 4
+    name: "Extend Response Type Handling"
+    context: |
+      The script currently handles 0x65, 0x64, 0x82 and 0x06. LDAP also defines SearchResultReference (0x73) and intermediateResponse. We need graceful handling for those tags.
+    prompt: |-
+      In the section that switches on `responseType = buffer[8]`, add cases to:
+      1. Detect tag 0x73 (SearchResultReference) and skip over its TLV using `parseBerLength`, continuing the scan.
+      2. Detect intermediateResponse (0x79) and treat it as non‐fatal (skip).
+      3. For unknown but valid LDAP tags (context‐specific 0xA0–0xBF), skip their TLV instead of throwing.
+      4. Keep the additional code under 1 KB to respect the overall character budget.
+
+  - id: 5
+    name: "Improve Proxy Corruption Detection Heuristic"
+    context: |
+      `isProxyCorruption` currently flags any printable ASCII byte (0x20–0x7E) as corruption. This is too broad and may mis-classify valid bytes.
+    prompt: |-
+      Refine `isProxyCorruption(resultCode)` to:
+      1. Only treat sequences of ≥3 printable ASCII bytes immediately following a valid LDAP TLV as corruption.
+      2. Reject single printable codes that match known LDAP error codes.
+      3. Keep the function small and compatible with ThousandEyes JS.
+
+  - id: 6
+    name: "Add Minimal Unit Tests for BER & Done Detection"
+    context: |
+      We need confidence that our changes work on edge cases without blowing the 100 KB limit. Use simple assertions and console logs—no external test frameworks.
+    prompt: |-
+      Write a `selfTest()` function at the bottom of `ldap-monitor.js` that:
+      1. Calls `parseBerLength()` with buffers for: short form (e.g. [0x05]), long form 2-octet, invalid indefinite, overflow value.
+      2. Calls `findSearchDoneIndex()` on synthetic buffers containing valid and invalid 0x65 TLVs.
+      3. Logs “PASS” or throws on failure.
+      4. Wrap the tests in `if (credentials.get('ldapDebugMode')==='true')` so it only runs in debug mode.
+      5. Keep tests under 500 lines and under 5 KB of script size.
 
