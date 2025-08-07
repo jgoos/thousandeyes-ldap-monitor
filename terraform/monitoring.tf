@@ -10,7 +10,7 @@ resource "thousandeyes_web_transaction" "ldap_test" {
   for_each = { for server in var.ldap_servers : server.name => server }
 
   test_name          = "LDAP Check - ${each.value.name}"
-  url                = "${each.value.hostname}:${each.value.port}"
+  url                = "ldaps://${each.value.hostname}:${each.value.port}"
   transaction_script = file("${path.module}/../ldap-monitor.js")
   agents             = var.agent_ids
   alert_rules        = [thousandeyes_alert_rule.ldap_alert_rule.rule_id]
