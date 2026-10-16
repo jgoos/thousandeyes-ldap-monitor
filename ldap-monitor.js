@@ -63,6 +63,7 @@ const CLEANUP_TIMEOUT_MS = 1000; // most that Unbind and socket close may take t
 const MAX_EMPTY_READS = 3; // consecutive empty reads treated as end of stream
 const MAX_DIAGNOSTIC_LENGTH = 200; // characters of server diagnosticMessage kept in errors
 const MAX_QUOTED_VALUES = 5; // server attribute values quoted in one message
+const MAX_DN_LENGTH = 4096; // a longer namingContexts value is not compared, and matches nothing
 const DEFAULT_MAX_CLOCK_SKEW_S = 300; // Kerberos' default tolerance for clock skew
 const DEFAULT_CERT_WARN_DAYS = 30; // warn this long before the LDAPS server certificate expires
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -521,6 +522,7 @@ function parseCaCertificates(value) {
   }
   return blocks.map((block) => {
     const body = block.replace(/-----(BEGIN|END) CERTIFICATE-----/g, '').replace(/\s+/g, '');
+    if (!body) throw configError('ldapCaBase64 holds an empty certificate block; paste the whole PEM certificate');
     return `-----BEGIN CERTIFICATE-----\n${body.match(/.{1,64}/g).join('\n')}\n-----END CERTIFICATE-----\n`;
   });
 }
@@ -547,14 +549,28 @@ const certificateName = (cert) => {
 };
 
 /**
- * When the certificate expires, from its valid_to field in Node's format, such as
- * "Oct 18 20:15:30 2026 GMT".
+ * Milliseconds since the epoch for a certificate date such as Node's "Oct  3 20:15:30 2026 GMT".
+ * A date without a time zone is read as GMT, as certificate times are, not as agent local time.
+ * @param {unknown} text
+ * @returns {number} NaN when `text` is not a date
+ */
+const parseCertificateDate = (text) => {
+  if (typeof text !== 'string' || text.length > 64) return NaN;
+  const value = text.trim();
+  if (/(?:GMT|UTC|Z|[+-]\d{2}:?\d{2})$/i.test(value)) return Date.parse(value);
+  // "… 2026" takes a " GMT" suffix; an ISO date without a zone ("2026-10-03T20:15:30") takes "Z".
+  const asGmt = Date.parse(`${value} GMT`);
+  return Number.isFinite(asGmt) ? asGmt : Date.parse(`${value}Z`);
+};
+
+/**
+ * When the certificate expires, from its valid_to field.
  * @returns {{ daysLeft: number, text: string, expiresAt: string } | null}
  *   null when valid_to is missing or not a date. daysLeft may be fractional or negative; text is,
  *   for example, "expires in 3 days".
  */
 const certificateExpiry = (cert, nowMs) => {
-  const expiresMs = cert && typeof cert.valid_to === 'string' ? Date.parse(cert.valid_to) : NaN;
+  const expiresMs = parseCertificateDate(cert && cert.valid_to);
   if (!Number.isFinite(expiresMs)) return null;
   const daysLeft = (expiresMs - nowMs) / DAY_MS;
   const days = Math.floor(Math.abs(daysLeft));
@@ -587,20 +603,54 @@ const stopMarker = (name) => {
  * @returns {number} NaN when `text` is not a GeneralizedTime
  */
 function parseGeneralizedTime(text) {
-  const match = /^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})?(\d{2})?(?:[.,](\d+))?(Z|[+-]\d{4})$/.exec(String(text).trim());
+  const value = String(text).trim();
+  if (value.length > 64) return NaN;
+  // g-time-zone is "Z" or a differential of hours and optional minutes: +HH or +HHMM.
+  const match = /^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})?(\d{2})?(?:[.,](\d+))?(?:(Z)|([+-])(\d{2})(\d{2})?)$/.exec(value);
   if (!match) return NaN;
   const [year, month, day, hour, minute, second] = match.slice(1, 7).map((part) => (part === undefined ? undefined : Number(part)));
-  const [fraction, zone] = match.slice(7);
+  const [fraction, utc, sign, offsetHours, offsetMinutes = '00'] = match.slice(7);
   if (month < 1 || month > 12 || day < 1 || day > 31 || hour > 23 || minute > 59 || second > 60) return NaN;
+  if (!utc && (Number(offsetHours) > 23 || Number(offsetMinutes) > 59)) return NaN;
   let ms = Date.UTC(year, month - 1, day, hour, minute ?? 0, second ?? 0);
   // A fraction is of the last unit given: second, minute or hour.
   if (fraction) ms += Number(`0.${fraction}`) * (second !== undefined ? 1000 : minute !== undefined ? 60000 : 3600000);
-  if (zone !== 'Z') ms -= (zone[0] === '-' ? -1 : 1) * (Number(zone.slice(1, 3)) * 60 + Number(zone.slice(3))) * 60000;
+  // Local time ahead of UTC (+) is later on the clock than the same instant in UTC.
+  if (!utc) ms -= (sign === '-' ? -1 : 1) * (Number(offsetHours) * 60 + Number(offsetMinutes)) * 60000;
   return ms;
 }
 
-/** A DN for comparison, ignoring letter case and spaces around separators. */
-const normalizeDn = (dn) => String(dn).trim().toLowerCase().replace(/\s*([,=+])\s*/g, '$1');
+/**
+ * A DN for comparison: lower case, without the spaces around "," "=" and "+" separators or at
+ * either end. A character escaped with "\" is part of a value, so "cn=a\, b" keeps its space.
+ * Hex escapes ("\2C") and the order of a multi-valued RDN are compared as written. One pass, so a
+ * hostile value cannot make it slow.
+ * @param {string} dn
+ * @returns {string | null} null for a DN longer than MAX_DN_LENGTH, which then matches nothing
+ */
+function normalizeDn(dn) {
+  const text = String(dn);
+  if (text.length > MAX_DN_LENGTH) return null;
+  let out = '';
+  let spaces = 0; // unescaped spaces not yet written: dropped before a separator or at the end
+  let atStart = true; // at the start, or just after a separator, where spaces are dropped too
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (ch === ' ') {
+      spaces++;
+    } else if (',=+'.includes(ch)) {
+      out += ch;
+      spaces = 0;
+      atStart = true;
+    } else {
+      const escaped = ch === '\\' && i + 1 < text.length ? ch + text[++i] : ch;
+      out += (atStart ? '' : ' '.repeat(spaces)) + escaped.toLowerCase();
+      spaces = 0;
+      atStart = false;
+    }
+  }
+  return out;
+}
 
 /** Server attribute values for a message: quoted, made safe, and at most MAX_QUOTED_VALUES. */
 const quoteValues = (values) => values.slice(0, MAX_QUOTED_VALUES).map((v) => `"${sanitizeServerText(v)}"`).join(', ') +
@@ -635,11 +685,12 @@ function checkRootDse(entry, { expectedNamingContext, maxClockSkewS, agentTimeMs
 
   if (expectedNamingContext) {
     const contexts = values('namingContexts');
+    const wanted = normalizeDn(expectedNamingContext);
     if (!entry) {
       problems.push(`the server returned no Root DSE entry; expected namingContexts to include "${expectedNamingContext}"`);
     } else if (contexts.length === 0) {
       problems.push(`the Root DSE lists no namingContexts; expected "${expectedNamingContext}"`);
-    } else if (!contexts.some((dn) => normalizeDn(dn) === normalizeDn(expectedNamingContext))) {
+    } else if (wanted === null || !contexts.some((dn) => normalizeDn(dn) === wanted)) {
       problems.push(`namingContexts does not include "${expectedNamingContext}"; the server lists ${quoteValues(contexts)}`);
     }
   }
@@ -681,7 +732,7 @@ const wholeNumberSetting = (name, value, fallback) => {
  * The scheme picks TLS, the port defaults to 389 or 636, and the DN is the search base. A "/"
  * with an empty DN selects the Root DSE explicitly; no "/" at all leaves the base unset (null).
  * Attributes, scope, filter and extensions must be empty: the probe always runs a base-scope
- * (objectClass=*) search that returns no attributes.
+ * (objectClass=*) search, for the Root DSE attributes it checks or, from a base DN, for none.
  * @param {unknown} url - test.getSettings().url
  * @returns {{ host: string, port: number, tls: boolean, baseDN: string | null } | null}
  *   null when `url` is not an ldap:// or ldaps:// URL
@@ -1165,8 +1216,17 @@ async function runTest() {
     }
 
     if (!baseDN) {
+      // Log only the attributes requested, under their own names: the server's attribute types
+      // could otherwise put arbitrary text in the log.
       if (debugMode) {
-        for (const [type, values] of rootDse || []) console.log(`Debug: Root DSE ${type}: ${quoteValues(values)}`);
+        for (const name of ROOT_DSE_ATTRIBUTES) {
+          const values = rootDse && rootDse.get(name.toLowerCase());
+          if (values) console.log(`Debug: Root DSE ${name}: ${quoteValues(values)}`);
+        }
+        const [currentTime] = (rootDse && rootDse.get('currenttime')) || [];
+        if (currentTime !== undefined && Number.isNaN(parseGeneralizedTime(currentTime))) {
+          console.log('Debug: Root DSE currentTime is not a GeneralizedTime; clock skew not checked');
+        }
       }
       facts.push(...checkRootDse(rootDse, {
         expectedNamingContext,

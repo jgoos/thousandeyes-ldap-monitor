@@ -20,17 +20,18 @@ const registerPath = fileURLToPath(new URL('./register-stub.js', import.meta.url
 
 /**
  * @param {object} config  TE_STUB_CONFIG: { credentials, settings, routes, enforceSocketTimeout,
- *   stallCleanup, peerCertificate }; see thousandeyes-stub.js
- * @param {{ timeLimitMs?: number }} [options]  kill the run after this long, like the
- *   ThousandEyes transaction time limit
+ *   stallCleanup, peerCertificate, failWrite }; see thousandeyes-stub.js
+ * @param {{ timeLimitMs?: number, env?: Record<string, string> }} [options]  timeLimitMs: kill the
+ *   run after this long, like the ThousandEyes transaction time limit; env: extra environment
+ *   variables for the script, such as TZ
  * @returns {Promise<ProbeResult>}
  */
-export async function runProbe(config, { timeLimitMs = 10_000 } = {}) {
+export async function runProbe(config, { timeLimitMs = 10_000, env = {} } = {}) {
   const dir = mkdtempSync(path.join(tmpdir(), 'ldap-monitor-probe-'));
   const tracePath = path.join(dir, 'trace.jsonl');
   try {
     const child = spawn(process.execPath, ['--import', registerPath, scriptPath], {
-      env: { ...process.env, TE_STUB_CONFIG: JSON.stringify(config), TE_STUB_TRACE: tracePath },
+      env: { ...process.env, ...env, TE_STUB_CONFIG: JSON.stringify(config), TE_STUB_TRACE: tracePath },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     let stdout = '';

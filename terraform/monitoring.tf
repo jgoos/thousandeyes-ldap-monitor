@@ -17,8 +17,9 @@ locals {
 resource "thousandeyes_alert_rule" "ldap_alert_rule" {
   rule_name  = "LDAP Transaction Failure"
   alert_type = "web-transactions"
-  # The script throws on any connection, TLS, LDAP result, timeout or latency failure, which
-  # ThousandEyes records as a transaction with errors. A run cut off by the time limit times out.
+  # The script throws on any configuration, connection, TLS, LDAP result, Root DSE or timeout
+  # failure, which ThousandEyes records as a transaction with errors. A run cut off by the time
+  # limit times out. Latency alerts are separate rules on marker durations (marker_alerts.tf).
   expression                = "((txCompletionHasError == true) || (txCompletionTimedOut == true))"
   rounds_violating_required = var.alert_rounds_violating_required
   rounds_violating_out_of   = var.alert_rounds_violating_out_of
