@@ -16,7 +16,8 @@ variable "ldap_servers" {
     - port: defaults to 636 with TLS and 389 without.
     - tls: false monitors plain LDAP. The script then refuses to bind unless the
       ldapAllowCleartext credential is among credential_ids.
-    - base_dn: search base; empty searches the Root DSE.
+    - base_dn: search base; empty searches the Root DSE, even if an ldapBaseDN credential
+      is attached (the generated URL ends in "/", which the script treats as authoritative).
   EOT
   type = list(object({
     name     = string

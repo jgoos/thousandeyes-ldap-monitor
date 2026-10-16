@@ -6,7 +6,7 @@ Each test's URL is an LDAP URL (RFC 4516), such as `ldaps://dc1.example.com:636/
 
 ## Prerequisites
 
-- [Terraform](https://www.terraform.io/) 1.5 or later.
+- [Terraform](https://www.terraform.io/) 1.7 or later (`terraform test` uses provider mocking).
 - Access to a ThousandEyes account.
 - **Initial setup requirement:** the API token used for the first `terraform apply` must belong to a user with permissions to create roles and groups (for example, a user with the `Account Admin` role).
 - The script's credentials, created in the ThousandEyes UI or API (`Settings ▸ Secure Credentials`): `ldapMonUser`, `ldapMonPass`, and any optional ones you use (`ldapCaBase64`, `ldapAllowCleartext`, ...). Terraform attaches them to the tests by ID only, so their values never enter Terraform state. List their IDs with `GET /v7/credentials`.
@@ -46,7 +46,7 @@ alert_email_recipients = ["ldap-oncall@example.com"]
 | `hostname` | (required) | Host name or IP address, without a scheme or port |
 | `port` | 636 with TLS, 389 without | |
 | `tls` | `true` | `false` uses plain LDAP. The script then refuses to bind unless the `ldapAllowCleartext` credential is in `credential_ids`, because a simple bind sends the password unencrypted |
-| `base_dn` | `""` (Root DSE) | Spaces, `/`, `?` and `#` are percent-encoded in the URL |
+| `base_dn` | `""` (Root DSE) | Spaces, `/`, `?` and `#` are percent-encoded in the URL. The URL always ends in `/` plus the DN, so an empty `base_dn` searches the Root DSE even when an `ldapBaseDN` credential is attached |
 
 The alert rule fires when a run completes with errors or times out (`txCompletionHasError`, `txCompletionTimedOut`). By default it needs 2 failing rounds out of 5. Change this with `alert_rounds_violating_required` and `alert_rounds_violating_out_of`. Tests collect console logs, so the script's PASS summary and failure messages are visible in the test views.
 

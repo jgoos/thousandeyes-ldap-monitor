@@ -1,5 +1,6 @@
 terraform {
-  required_version = ">= 1.5.0"
+  # 1.7 or later: terraform test uses mock_provider (tests/monitoring.tftest.hcl).
+  required_version = ">= 1.7.0"
 
   required_providers {
     thousandeyes = {
