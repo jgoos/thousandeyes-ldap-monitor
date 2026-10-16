@@ -781,7 +781,8 @@ function parseLdapUrl(url) {
  * URL's DN when the URL has a "/" path (an empty DN there is the Root DSE), else the ldapBaseDN
  * credential, else the Root DSE ("").
  * @returns {{ host: string, port: number, tls: boolean, baseDN: string, source: string }}
- * @throws {Error} a configuration error when no server is configured or the URL is malformed
+ * @throws {Error} a configuration error when no server is configured, the URL is malformed, or
+ *   ldapPort is not 389 or 636 (an ldapPort that is not a whole number included)
  */
 function resolveTarget({ testUrl, ldapHost, ldapPort, ldapBaseDN }) {
   const fromUrl = parseLdapUrl(testUrl);
@@ -791,7 +792,7 @@ function resolveTarget({ testUrl, ldapHost, ldapPort, ldapBaseDN }) {
   if (!host) {
     throw configError('no LDAP server configured. Set the test URL to ldaps://<host> (or ldap://<host>:389), or set the ldapHost credential');
   }
-  const port = parseInt(ldapPort, 10) || 636;
+  const port = wholeNumberSetting('ldapPort', ldapPort, 636);
   if (port !== 389 && port !== 636) {
     throw configError(`invalid port ${port} in the ldapPort credential: must be 389 (LDAP) or 636 (LDAPS); use an ldap:// or ldaps:// test URL for other ports`);
   }
