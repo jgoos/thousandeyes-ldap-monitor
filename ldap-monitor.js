@@ -18,7 +18,7 @@
  * Optional Credentials:
  *   ldapCaBase64       →  CA certificate(s) for LDAPS, as PEM text or base64-encoded PEM
  *   ldapHost, ldapPort →  server and port (389 or 636) when the test URL is not an LDAP URL
- *   ldapBaseDN         →  search base when the test URL has no DN (default: Root DSE)
+ *   ldapBaseDN         →  search base when the test URL has no "/" path (default: Root DSE)
  *   ldapAllowCleartext →  'true' to allow sending the password without TLS (RFC 4513 5.1.3)
  *   ldapBindOnly       →  'true' to skip the search
  *   ldapDebugMode      →  'true' for verbose debugging (default: false)
@@ -481,11 +481,12 @@ const isEnabled = (value) => ['true', '1', 'yes'].includes(String(value || '').t
 
 /**
  * Parse an RFC 4516 LDAP URL: ldap[s]://host[:port][/dn[?attributes?scope?filter?extensions]].
- * The scheme picks TLS, the port defaults to 389 or 636, and the DN is the search base.
+ * The scheme picks TLS, the port defaults to 389 or 636, and the DN is the search base. A "/"
+ * with an empty DN selects the Root DSE explicitly; no "/" at all leaves the base unset (null).
  * Attributes, scope, filter and extensions must be empty: the probe always runs a base-scope
  * (objectClass=*) search that returns no attributes.
  * @param {unknown} url - test.getSettings().url
- * @returns {{ host: string, port: number, tls: boolean, baseDN: string } | null}
+ * @returns {{ host: string, port: number, tls: boolean, baseDN: string | null } | null}
  *   null when `url` is not an ldap:// or ldaps:// URL
  * @throws {Error} a configuration error for a malformed LDAP URL
  */
@@ -494,7 +495,7 @@ function parseLdapUrl(url) {
   if (!/^ldaps?:\/\//i.test(text)) return null;
   const match = /^(ldaps?):\/\/(\[[^\]]*\]|[^:/?#]*)(?::(\d*))?(?:\/([^?#]*)(\?[^#]*)?)?$/i.exec(text);
   if (!match) throw configError(`the test URL "${text}" is not a valid LDAP URL`);
-  const [, scheme, rawHost, rawPort, rawDN = '', query = ''] = match;
+  const [, scheme, rawHost, rawPort, rawDN, query = ''] = match;
   const tls = scheme.toLowerCase() === 'ldaps';
   if (!rawHost) throw configError(`the test URL "${text}" has no host`);
   // A registered name may be percent-encoded (RFC 3986 section 3.2.2); an IPv6 literal sits in brackets.
@@ -515,9 +516,9 @@ function parseLdapUrl(url) {
   if (query.slice(1).split('?').some((part) => part !== '')) {
     throw configError('LDAP URL attributes, scope, filter and extensions are not supported; give only the base DN after the host');
   }
-  let baseDN;
+  let baseDN = null;
   try {
-    baseDN = decodeURIComponent(rawDN);
+    if (rawDN !== undefined) baseDN = decodeURIComponent(rawDN);
   } catch {
     throw configError(`the DN in the test URL "${text}" has invalid percent-encoding`);
   }
@@ -527,13 +528,14 @@ function parseLdapUrl(url) {
 /**
  * Where to connect and what to search. The test URL wins when it is an LDAP URL; otherwise the
  * ldapHost and ldapPort credentials are used, with port 636 meaning LDAPS. The search base is the
- * URL's DN, else the ldapBaseDN credential, else the Root DSE ("").
+ * URL's DN when the URL has a "/" path (an empty DN there is the Root DSE), else the ldapBaseDN
+ * credential, else the Root DSE ("").
  * @returns {{ host: string, port: number, tls: boolean, baseDN: string, source: string }}
  * @throws {Error} a configuration error when no server is configured or the URL is malformed
  */
 function resolveTarget({ testUrl, ldapHost, ldapPort, ldapBaseDN }) {
   const fromUrl = parseLdapUrl(testUrl);
-  if (fromUrl) return { ...fromUrl, baseDN: fromUrl.baseDN || ldapBaseDN, source: 'test URL' };
+  if (fromUrl) return { ...fromUrl, baseDN: fromUrl.baseDN ?? ldapBaseDN, source: 'test URL' };
 
   const host = String(ldapHost || '').trim();
   if (!host) {

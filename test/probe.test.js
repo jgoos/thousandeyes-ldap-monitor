@@ -367,9 +367,14 @@ describe('target and search base', () => {
     assert.equal(searchBase(result), 'dc=from-url');
   });
 
-  it('uses ldapBaseDN when the test URL has no DN', async () => {
-    const result = await probeUrl('ldap://ldap.test/', { credentials: { ldapBaseDN: 'dc=from-credential' } });
+  it('uses ldapBaseDN when the test URL has no "/" path', async () => {
+    const result = await probeUrl('ldap://ldap.test', { credentials: { ldapBaseDN: 'dc=from-credential' } });
     assert.equal(searchBase(result), 'dc=from-credential');
+  });
+
+  it('keeps an explicit Root DSE ("/" with an empty DN) over the ldapBaseDN credential', async () => {
+    const result = await probeUrl('ldap://ldap.test/', { credentials: { ldapBaseDN: 'dc=from-credential' } });
+    assert.equal(searchBase(result), '');
   });
 
   it('prefers the test URL over the ldapHost credential', async () => {
