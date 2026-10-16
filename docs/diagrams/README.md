@@ -21,6 +21,7 @@ diagrams/
 │   ├── monitoring_timeline.png
 │   └── firewall_rules.png
 ├── ldap_monitoring.py       # Diagram generator
+├── requirements.txt         # Python dependencies, installed by the Makefile
 ├── Makefile                 # Easy commands
 └── README.md               # This file
 ```
@@ -114,8 +115,8 @@ This removes:
 
 ### Virtual Environment
 The Makefile automatically:
-- Creates/updates virtual environment
-- Installs required dependencies
+- Creates/updates virtual environment (`venv/`, ignored by git)
+- Installs required dependencies from `requirements.txt`
 - Activates environment for generation
 
 ### Icon Sources
