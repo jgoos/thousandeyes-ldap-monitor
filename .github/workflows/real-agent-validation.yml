@@ -3,15 +3,12 @@ name: Real-agent validation
 # Tier 2: runs ldap-monitor.js once on a real ThousandEyes agent as a web-transaction instant
 # test (tier 1, ci.yml, runs it against a stub). Set-up: docs/REAL_AGENT_VALIDATION.md.
 # Deliberately not triggered by pull_request or push: fork pull requests must never reach the
-# ThousandEyes token. Until the secrets and variables exist, every run skips with a notice.
+# ThousandEyes token. The target comes only from the TE_TARGET_URL secret, never from an input:
+# the test carries the bind credentials, so whoever picks the target receives the password.
 
 on:
   workflow_dispatch:
     inputs:
-      target_url:
-        description: 'LDAP test URL, e.g. ldaps://ldap.example.com:636/ (empty: the TE_TARGET_URL secret; inputs are not masked)'
-        required: false
-        type: string
       agent_id:
         description: 'Agent ID(s), comma-separated (empty: the TE_AGENT_IDS variable)'
         required: false
@@ -36,6 +33,9 @@ jobs:
     name: Instant test on a ThousandEyes agent
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    # Secrets and variables live in this environment, limited to the main branch. Create it
+    # before the first run: GitHub creates a missing environment on first use, unprotected.
+    environment: real-agent-validation
     env:
       # Not secret. The token and the target URL are passed only to the steps that need them.
       TE_ACCOUNT_GROUP_ID: ${{ vars.TE_ACCOUNT_GROUP_ID }}
@@ -43,29 +43,43 @@ jobs:
       TE_CREDENTIAL_IDS: ${{ vars.TE_CREDENTIAL_IDS }}
       TE_EXPECTED_MARKERS: ${{ vars.TE_EXPECTED_MARKERS }}
       TE_TIME_LIMIT: ${{ vars.TE_TIME_LIMIT }}
-      TE_HIDE_CONSOLE_LOGS: ${{ vars.TE_HIDE_CONSOLE_LOGS }}
+      TE_SHOW_DETAILS: ${{ vars.TE_SHOW_DETAILS }}
     steps:
+      # Nothing configured: a scheduled run skips with a notice. Anything else that is incomplete
+      # fails: a partial set-up, or a manual run with nothing configured.
       - name: Check configuration
         id: config
         env:
+          EVENT: ${{ github.event_name }}
           HAS_TOKEN: ${{ secrets.TE_API_TOKEN != '' }}
-          HAS_TARGET: ${{ (inputs.target_url || secrets.TE_TARGET_URL) != '' }}
+          HAS_TARGET: ${{ secrets.TE_TARGET_URL != '' }}
         run: |
           missing=()
           [ "$HAS_TOKEN" = true ] || missing+=('secret TE_API_TOKEN')
-          [ "$HAS_TARGET" = true ] || missing+=('secret TE_TARGET_URL (or the target_url input)')
+          [ "$HAS_TARGET" = true ] || missing+=('secret TE_TARGET_URL')
           [ -n "$TE_ACCOUNT_GROUP_ID" ] || missing+=('variable TE_ACCOUNT_GROUP_ID')
-          [ -n "$TE_AGENT_IDS" ] || missing+=('variable TE_AGENT_IDS (or the agent_id input)')
+          [ -n "$TE_AGENT_IDS" ] || missing+=('variable TE_AGENT_IDS')
           [ -n "$TE_CREDENTIAL_IDS" ] || missing+=('variable TE_CREDENTIAL_IDS')
-          if [ "${#missing[@]}" -gt 0 ]; then
-            printf -v list '%s, ' "${missing[@]}"
-            message="Not configured: ${list%, }. See docs/REAL_AGENT_VALIDATION.md."
-            echo "::notice title=Real-agent validation skipped::${message}"
-            echo "Real-agent validation skipped. ${message}" >> "$GITHUB_STEP_SUMMARY"
-            echo 'configured=false' >> "$GITHUB_OUTPUT"
-          else
+          required=5
+          if [ "${#missing[@]}" -eq 0 ]; then
             echo 'configured=true' >> "$GITHUB_OUTPUT"
+            exit 0
           fi
+          printf -v list '%s, ' "${missing[@]}"
+          list="${list%, }"
+          help='See docs/REAL_AGENT_VALIDATION.md.'
+          if [ "${#missing[@]}" -eq "$required" ] && [ "$EVENT" = schedule ]; then
+            echo "::notice title=Real-agent validation skipped::Not configured. ${help}"
+            echo "Real-agent validation skipped: not configured. ${help}" >> "$GITHUB_STEP_SUMMARY"
+            echo 'configured=false' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "${#missing[@]}" -eq "$required" ]; then
+            echo "::error title=Real-agent validation not configured::Missing ${list}. ${help}"
+          else
+            echo "::error title=Real-agent validation partly configured::Missing ${list}. ${help}"
+          fi
+          exit 1
 
       - if: steps.config.outputs.configured == 'true'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -82,7 +96,7 @@ jobs:
         if: steps.config.outputs.configured == 'true'
         env:
           TE_API_TOKEN: ${{ secrets.TE_API_TOKEN }}
-          TE_TARGET_URL: ${{ inputs.target_url || secrets.TE_TARGET_URL }}
+          TE_TARGET_URL: ${{ secrets.TE_TARGET_URL }}
         run: node scripts/te-instant-test.mjs --script ldap-monitor.js
 
       # Manual runs only: records the runtime behaviour that test/support/thousandeyes-stub.js
@@ -91,7 +105,7 @@ jobs:
         if: ${{ !cancelled() && steps.config.outputs.configured == 'true' && inputs.runtime_facts }}
         env:
           TE_API_TOKEN: ${{ secrets.TE_API_TOKEN }}
-          TE_TARGET_URL: ${{ inputs.target_url || secrets.TE_TARGET_URL }}
+          TE_TARGET_URL: ${{ secrets.TE_TARGET_URL }}
         run: >-
           node scripts/te-instant-test.mjs --script scripts/te-runtime-facts.js
           --markers none --credentials none --time-limit 60

@@ -17,15 +17,16 @@
  *   TE_TIME_LIMIT         --time-limit: transaction time limit in seconds, 5-180 (default 30)
  *   TE_POLL_INTERVAL      seconds between result polls (default 10)
  *   TE_POLL_TIMEOUT       seconds to wait for all results (default 600)
- *   TE_HIDE_CONSOLE_LOGS  'true' to count console log lines without printing them
+ *   TE_SHOW_DETAILS       'true' to print error details and console logs; default true locally,
+ *                         false in GitHub Actions, where logs of a public repository are public
  *   TE_API_BASE_URL       default https://api.thousandeyes.com/v7
  * "none" as a list value means an empty list, e.g. --markers none.
  *
  * Exit status: 0 every agent passed; 1 an agent reported an error, a marker is missing, or a
  * result did not arrive in time; 2 configuration or API error.
  *
- * The token goes only into the Authorization header. Credential values never pass through here:
- * the test refers to ThousandEyes credentials by ID.
+ * The token goes only into the Authorization header and never into output. Credential values
+ * never pass through here: the test refers to ThousandEyes credentials by ID.
  */
 import { createHash, randomUUID } from 'node:crypto';
 import { appendFileSync, readFileSync } from 'node:fs';
@@ -42,11 +43,15 @@ const DEFAULT_TIME_LIMIT_S = 30;
 const DEFAULT_TARGET_TIME_S = 10; // ThousandEyes default; it may not exceed timeLimit
 const DEFAULT_POLL_INTERVAL_S = 10;
 const DEFAULT_POLL_TIMEOUT_S = 600;
+const WINDOW_MARGIN_S = 60; // results window reaches this far before the test was created
+const MAX_RESULT_PAGES = 20; // per poll, following _links.next
 const CONSOLE_LOG_ATTEMPTS = 3; // console logs can lag the result; they never decide the verdict
 const REQUEST_TIMEOUT_MS = 30_000;
 const MAX_RATE_LIMIT_WAIT_MS = 60_000;
 const CREATE_ATTEMPTS = 3; // only a 429 is retried: the test was not created
 const ID_PATTERN = /^[A-Za-z0-9_-]+$/;
+const TOKEN_PATTERN = /^[\x21-\x7e]+$/; // printable ASCII without spaces: valid in a header
+const SHOW_DETAILS_HINT = 'set TE_SHOW_DETAILS=true to show';
 
 const OPTIONS = {
   'dry-run': { type: 'boolean', default: false },
@@ -107,9 +112,11 @@ export function readConfig({ argv = [], env = {}, now = Date.now } = {}) {
   }
 
   const markersRaw = pick(values.markers, env.TE_EXPECTED_MARKERS);
+  const inActions = env.GITHUB_ACTIONS === 'true';
   const config = {
     dryRun: Boolean(values['dry-run']),
     help: Boolean(values.help),
+    inActions,
     token: String(env.TE_API_TOKEN ?? '').trim(),
     accountGroupId: String(env.TE_ACCOUNT_GROUP_ID ?? '').trim(),
     baseUrl: String(env.TE_API_BASE_URL || DEFAULT_BASE_URL).trim().replace(/\/+$/, ''),
@@ -121,13 +128,16 @@ export function readConfig({ argv = [], env = {}, now = Date.now } = {}) {
     timeLimitS: integerSetting('time limit', pick(values['time-limit'], env.TE_TIME_LIMIT), DEFAULT_TIME_LIMIT_S, 5, 180, errors),
     pollIntervalS: integerSetting('TE_POLL_INTERVAL', env.TE_POLL_INTERVAL, DEFAULT_POLL_INTERVAL_S, 1, 300, errors),
     pollTimeoutS: integerSetting('TE_POLL_TIMEOUT', env.TE_POLL_TIMEOUT, DEFAULT_POLL_TIMEOUT_S, 30, 3600, errors),
-    hideConsoleLogs: isTrue(env.TE_HIDE_CONSOLE_LOGS),
+    showDetails: env.TE_SHOW_DETAILS ? isTrue(env.TE_SHOW_DETAILS) : !inActions,
     testName: values.name || `ldap-monitor validation ${new Date(now()).toISOString()}`
       + (env.GITHUB_RUN_ID ? ` (run ${env.GITHUB_RUN_ID})` : ''),
   };
   if (config.help) return { config, errors };
 
   if (!config.dryRun && !config.token) errors.push('TE_API_TOKEN is not set');
+  if (config.token && !TOKEN_PATTERN.test(config.token)) {
+    errors.push('TE_API_TOKEN must be printable ASCII without spaces (it goes into an HTTP header)');
+  }
   if (!config.dryRun && !config.accountGroupId) errors.push('TE_ACCOUNT_GROUP_ID is not set');
   if (config.accountGroupId && !ID_PATTERN.test(config.accountGroupId)) errors.push('TE_ACCOUNT_GROUP_ID is not an ID');
 
@@ -195,6 +205,13 @@ export function apiUrl(baseUrl, segments, query = {}) {
   return url.toString();
 }
 
+/**
+ * The `window` query value for results since the test was created: "A dynamic time interval up
+ * to the current time of the request", here in seconds, with a margin before creation.
+ */
+export const resultsWindow = (createdAtMs, nowMs) =>
+  `${Math.max(0, Math.ceil((nowMs - createdAtMs) / 1000)) + WINDOW_MARGIN_S}s`;
+
 /** The request --dry-run prints: token redacted, the script reduced to its size and hash. */
 export function describeRequest(config, body) {
   const url = apiUrl(config.baseUrl, ['tests', 'web-transactions', 'instant'], {
@@ -238,17 +255,20 @@ const parseResetTime = (raw) => {
 };
 
 /**
- * How long to wait after an HTTP 429: until the reset time ThousandEyes reports for instant
- * tests or for the organization, at least 1 s and at most 60 s; `fallbackMs` without a header.
+ * How long to wait after an HTTP 429: until the later of the reset times ThousandEyes reports
+ * for instant tests and for the organization, at least 1 s and at most 60 s; `fallbackMs`
+ * without either header.
  * @param {Headers} headers
  * @param {number} nowMs
  * @param {number} fallbackMs
  */
 export function rateLimitDelayMs(headers, nowMs, fallbackMs) {
-  const reset = parseResetTime(headers.get('x-instant-test-rate-limit-reset'))
-    ?? parseResetTime(headers.get('x-organization-rate-limit-reset'));
-  if (reset === null) return fallbackMs;
-  return Math.min(Math.max(reset - nowMs, 1000), MAX_RATE_LIMIT_WAIT_MS);
+  const resets = [
+    parseResetTime(headers.get('x-instant-test-rate-limit-reset')),
+    parseResetTime(headers.get('x-organization-rate-limit-reset')),
+  ].filter((reset) => reset !== null);
+  if (resets.length === 0) return fallbackMs;
+  return Math.min(Math.max(Math.max(...resets) - nowMs, 1000), MAX_RATE_LIMIT_WAIT_MS);
 }
 
 /** Short, single-line reason from an error body (application/problem+json or other). */
@@ -265,14 +285,30 @@ function problemText(data, text) {
 }
 
 /**
+ * Why fetch() threw, without its message: for an invalid header that message quotes the header,
+ * which would be the token.
+ */
+function describeFetchFailure(err) {
+  if (err && (err.name === 'TimeoutError' || err.name === 'AbortError')) {
+    return { reason: `no response within ${REQUEST_TIMEOUT_MS / 1000} s`, network: true };
+  }
+  const code = err && err.cause && typeof err.cause.code === 'string' ? err.cause.code : null;
+  if (code) return { reason: `network error ${oneLine(code)}`, network: true };
+  return { reason: 'the request could not be sent (check TE_API_TOKEN and TE_API_BASE_URL)', network: false };
+}
+
+/**
  * Minimal ThousandEyes v7 client. Every request carries the bearer token and the account group.
+ * `call` takes path segments; `follow` takes a `_links` href, only within the API base URL.
  * @param {{ baseUrl: string, token: string, accountGroupId: string, fetchImpl: typeof fetch,
  *   now: () => number, pollIntervalMs: number }} options
  */
 export function createClient({ baseUrl, token, accountGroupId, fetchImpl, now, pollIntervalMs }) {
-  return async function call(method, segments, { body } = {}) {
-    const url = apiUrl(baseUrl, segments, { aid: accountGroupId });
-    const label = `${method} /${segments.join('/')}`;
+  const base = new URL(`${baseUrl}/`);
+  // Last line of defence: no message built here may contain the token.
+  const redact = (text) => (token ? String(text).split(token).join('<redacted>') : String(text));
+
+  async function request(method, url, label, body) {
     const headers = {
       Authorization: `Bearer ${token}`,
       Accept: 'application/hal+json, application/json, application/problem+json',
@@ -287,8 +323,9 @@ export function createClient({ baseUrl, token, accountGroupId, fetchImpl, now, p
         signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
       });
     } catch (err) {
-      // No response at all: for a GET, polling may try again.
-      throw new ApiError(`${label} failed: ${err && err.message || err}`, { retryable: method === 'GET' });
+      // No response. A GET may be retried after a network error; a POST may have arrived.
+      const { reason, network } = describeFetchFailure(err);
+      throw new ApiError(redact(`${label} failed: ${reason}`), { retryable: network && method === 'GET' });
     }
     const text = await response.text();
     let data = null;
@@ -299,14 +336,32 @@ export function createClient({ baseUrl, token, accountGroupId, fetchImpl, now, p
     }
     if (!response.ok) {
       const status = response.status;
-      throw new ApiError(`${label} returned HTTP ${status}${problemText(data, text)}`, {
+      throw new ApiError(redact(`${label} returned HTTP ${status}${problemText(data, text)}`), {
         status,
         retryable: status === 429 || (method === 'GET' && status >= 500),
         retryAfterMs: status === 429 ? rateLimitDelayMs(response.headers, now(), pollIntervalMs) : undefined,
       });
     }
     return data ?? {};
+  }
+
+  const call = (method, segments, { body, query = {} } = {}) =>
+    request(method, apiUrl(baseUrl, segments, { aid: accountGroupId, ...query }), `${method} /${segments.join('/')}`, body);
+
+  call.follow = (href) => {
+    let url;
+    try {
+      url = new URL(href, base);
+    } catch {
+      throw new ApiError('the API returned an invalid next link');
+    }
+    if (url.origin !== base.origin || !url.pathname.startsWith(base.pathname)) {
+      throw new ApiError('the API returned a next link outside the API; not following it');
+    }
+    if (accountGroupId) url.searchParams.set('aid', accountGroupId);
+    return request('GET', url.toString(), `GET ${url.pathname.slice(base.pathname.length - 1)} (next page)`);
   };
+  return call;
 }
 
 /* ───────────── Polling ───────────── */
@@ -346,6 +401,23 @@ async function poll(step, { deadline, intervalMs, maxAttempts, now, sleep, notFo
 
 const asString = (value) => (value === null || value === undefined ? '' : String(value));
 const resultsOf = (data) => (data && Array.isArray(data.results) ? data.results : []);
+const nextHref = (data) => (data && data._links && data._links.next && typeof data._links.next.href === 'string'
+  ? data._links.next.href : null);
+
+/**
+ * Add every result in `results` to `byAgent`, keeping each agent's latest round.
+ * @param {Map<string, object>} byAgent
+ * @param {object[]} results
+ */
+export function collectResults(byAgent, results) {
+  for (const result of results) {
+    const agentId = asString(result && result.agent && result.agent.agentId);
+    if (!agentId) continue;
+    const known = byAgent.get(agentId);
+    if (!known || Number(result.roundId) > Number(known.roundId)) byAgent.set(agentId, result);
+  }
+  return byAgent;
+}
 
 /**
  * Create the instant test, then wait for one result per agent, its markers and console logs.
@@ -355,6 +427,7 @@ export async function runInstantTest({ config, body, fetchImpl = fetch, sleep = 
   const intervalMs = config.pollIntervalS * 1000;
   const call = createClient({ ...config, fetchImpl, now, pollIntervalMs: intervalMs });
 
+  const createdAt = now();
   let created;
   for (let attempt = 1; ; attempt++) {
     try {
@@ -368,19 +441,25 @@ export async function runInstantTest({ config, body, fetchImpl = fetch, sleep = 
   }
   const testId = asString(created.testId);
   if (!testId) throw new ApiError('POST /tests/web-transactions/instant returned no testId');
-  log(`Created instant test ${testId}; waiting up to ${config.pollTimeoutS} s for ${config.agentIds.length} agent(s)`);
+  log(`Created instant test ${oneLine(testId)}; waiting up to ${config.pollTimeoutS} s for ${config.agentIds.length} agent(s)`);
 
   const deadline = now() + config.pollTimeoutS * 1000;
   const maxAttempts = Math.ceil(config.pollTimeoutS / config.pollIntervalS) + 1;
   const pollOptions = { deadline, intervalMs, maxAttempts, now, sleep };
 
-  // 1 ▸ One summary result per agent. Without a window the endpoint returns the latest round.
+  // 1 ▸ One result per requested agent. Without a window the endpoint returns only the latest
+  //     round, and agents may report in different rounds; so ask for every round since the test
+  //     was created, follow the pages, and keep what earlier polls found.
+  const byAgent = new Map();
   let reported = -1;
   const summary = await poll(async () => {
-    const byAgent = new Map();
-    for (const result of resultsOf(await call('GET', ['test-results', testId, 'web-transactions']))) {
-      const agentId = asString(result.agent && result.agent.agentId);
-      if (agentId && !byAgent.has(agentId)) byAgent.set(agentId, result);
+    let data = await call('GET', ['test-results', testId, 'web-transactions'], {
+      query: { window: resultsWindow(createdAt, now()) },
+    });
+    collectResults(byAgent, resultsOf(data));
+    for (let page = 1; page < MAX_RESULT_PAGES && nextHref(data); page++) {
+      data = await call.follow(nextHref(data));
+      collectResults(byAgent, resultsOf(data));
     }
     const count = config.agentIds.filter((id) => byAgent.has(id)).length;
     if (count !== reported) {
@@ -392,7 +471,6 @@ export async function runInstantTest({ config, body, fetchImpl = fetch, sleep = 
 
   // 2 ▸ Per agent: the detailed result, which carries the markers, then the console logs.
   const rounds = new Map();
-  const byAgent = summary.value || new Map();
   for (const agentId of config.agentIds) {
     const result = byAgent.get(agentId);
     if (!result) continue;
@@ -422,6 +500,12 @@ export async function runInstantTest({ config, body, fetchImpl = fetch, sleep = 
 
 /* ───────────── Verdict ───────────── */
 
+/** The problem line for an agent error; with `show` false, only the type and the length. */
+const errorProblem = (errorType, errorDetails, show) => {
+  const label = `error${errorType ? ` (${errorType})` : ''}`;
+  return show ? `${label}: ${errorDetails}` : `${label}: ${errorDetails.length} characters hidden (${SHOW_DETAILS_HINT})`;
+};
+
 /**
  * Check one agent's result: no errorDetails, and every expected marker reported.
  * @param {object} result  WebTransactionDetailTestResult (or the summary result, which has no markers)
@@ -431,7 +515,7 @@ export function evaluateRound(result, expectedMarkers) {
   const problems = [];
   const errorDetails = asString(result.errorDetails).trim();
   const errorType = asString(result.errorType).trim();
-  if (errorDetails) problems.push(`error${errorType ? ` (${errorType})` : ''}: ${errorDetails}`);
+  if (errorDetails) problems.push(errorProblem(errorType, errorDetails, true));
 
   const markers = (Array.isArray(result.markers) ? result.markers : []).map((marker) => ({
     name: asString(marker && marker.name),
@@ -484,21 +568,68 @@ export function evaluateRun({ agentIds, rounds, expectedMarkers, pollTimeoutS })
 
 /* ───────────── Output ───────────── */
 
-/** Text from the API or the agent on one line: control characters become spaces. */
+/**
+ * One line of text from the API or an agent, made inert for the GitHub runner: control
+ * characters become spaces, `##[` (legacy commands, matched anywhere in a line) is broken up,
+ * and so is a leading `::`. The ::stop-commands:: fence in main() is the primary defence.
+ */
 // eslint-disable-next-line no-control-regex
-const oneLine = (value) => asString(value).replace(/[\u0000-\u001f\u007f]+/g, ' ');
+export const neutralise = (line) => asString(line).replace(/[\u0000-\u001f\u007f]+/g, ' ')
+  .replace(/##\[/g, '# #[')
+  .replace(/^(\s*)::/, '$1: :');
 
-/** Untrusted multi-line text, each line indented (so none can start a workflow command). */
-// eslint-disable-next-line no-control-regex
-const indentLines = (value, prefix) => asString(value).split(/\r\n|\r|\n/).map((line) => `${prefix}${line.replace(/[\u0000-\u001f\u007f]+/g, ' ')}`);
+const oneLine = (value) => neutralise(value);
+
+/** Untrusted multi-line text: one neutralised line per line, each with `prefix`. */
+const indentLines = (value, prefix) => asString(value).split(/\r\n|\r|\n/).map((line) => `${prefix}${neutralise(line)}`);
+
+/** Workflow command data escaping, as in @actions/core: %, CR and LF. */
+export const escapeCommandData = (value) => asString(value).replace(/%/g, '%25').replace(/\r/g, '%0D').replace(/\n/g, '%0A');
+
+/**
+ * A `runtime-fact <name>: <JSON>` console line with every quoted error message replaced by its
+ * length, or null when the line is not one.
+ */
+export function redactFactLine(line) {
+  const match = /^runtime-fact (\S+): (.*)$/.exec(asString(line));
+  if (!match) return null;
+  let value;
+  try {
+    value = JSON.parse(match[2]);
+  } catch {
+    return null;
+  }
+  const redact = (node) => {
+    if (Array.isArray(node)) return node.map(redact);
+    if (!node || typeof node !== 'object') return node;
+    return Object.fromEntries(Object.entries(node).map(([key, child]) => [
+      key,
+      key === 'message' && typeof child === 'string' ? `<${child.length} characters hidden>` : redact(child),
+    ]));
+  };
+  return `runtime-fact ${match[1]}: ${JSON.stringify(redact(value))}`;
+}
 
 const agentLabel = (agent) => `Agent ${oneLine(agent.agentId)}${agent.agentName ? ` (${oneLine(agent.agentName)})` : ''}`;
+
+function consoleLogLines(logs, showDetails) {
+  if (showDetails) {
+    return [`  console logs (${logs.length}):`,
+      ...logs.flatMap((entry) => indentLines(entry && entry.value, `    [${oneLine(entry && entry.level) || '?'}] `))];
+  }
+  // Hidden: runtime facts still show, with error messages reduced to their length.
+  const facts = logs.map((entry) => ({ entry, fact: redactFactLine(entry && entry.value) })).filter((item) => item.fact);
+  const hidden = logs.length - facts.length;
+  const lines = [`  console logs (${logs.length}${hidden ? `, ${hidden} hidden: ${SHOW_DETAILS_HINT}` : ''}):`];
+  for (const { entry, fact } of facts) lines.push(...indentLines(fact, `    [${oneLine(entry.level) || '?'}] `));
+  return lines;
+}
 
 /**
  * Human-readable result, one line per fact.
  * @returns {string[]}
  */
-export function formatSummary(run, { testId, timeLimitS, expectedMarkers, hideConsoleLogs = false }) {
+export function formatSummary(run, { testId, timeLimitS, expectedMarkers, showDetails = true }) {
   const lines = [
     `Instant test ${oneLine(testId)}: time limit ${timeLimitS} s; expected markers: ${expectedMarkers.length ? expectedMarkers.join(', ') : 'none'}`,
   ];
@@ -510,16 +641,14 @@ export function formatSummary(run, { testId, timeLimitS, expectedMarkers, hideCo
     if (agent.markers.length) {
       lines.push(`  markers: ${agent.markers.map((m) => `${oneLine(m.name)} ${m.duration === null ? '?' : `${m.duration} ms`}`).join(', ')}`);
     }
-    for (const problem of agent.problems) lines.push(...indentLines(problem, '  ! '));
-    if (agent.consoleLogsError) lines.push(`  console logs unavailable: ${oneLine(agent.consoleLogsError)}`);
-    const logs = agent.consoleLogs;
-    if (logs.length && hideConsoleLogs) lines.push(`  console logs: ${logs.length} line(s), hidden (TE_HIDE_CONSOLE_LOGS)`);
-    else if (logs.length) {
-      lines.push(`  console logs (${logs.length}):`);
-      for (const entry of logs) lines.push(...indentLines(entry && entry.value, `    [${oneLine(entry && entry.level) || '?'}] `));
-    } else if (agent.hasResult && !agent.consoleLogsError) {
-      lines.push('  console logs: none');
+    const shownError = agent.errorDetails ? errorProblem(agent.errorType, agent.errorDetails, true) : null;
+    for (const problem of agent.problems) {
+      const text = problem === shownError ? errorProblem(agent.errorType, agent.errorDetails, showDetails) : problem;
+      lines.push(...indentLines(text, '  ! '));
     }
+    if (agent.consoleLogsError) lines.push(`  console logs unavailable: ${oneLine(agent.consoleLogsError)}`);
+    if (agent.consoleLogs.length) lines.push(...consoleLogLines(agent.consoleLogs, showDetails));
+    else if (agent.hasResult && !agent.consoleLogsError) lines.push('  console logs: none');
   }
   const failed = run.agents.filter((agent) => !agent.ok).length;
   lines.push(run.ok ? `Result: PASS (${run.agents.length} agent(s))` : `Result: FAIL (${failed} of ${run.agents.length} agent(s))`);
@@ -535,7 +664,8 @@ const cell = (value) => oneLine(value).replace(/\|/g, '\\|');
 export function formatStepSummary(run, { testId, scriptPath }) {
   const rows = run.agents.map((agent) => {
     const markers = agent.markers.map((m) => `${m.name} ${m.duration === null ? '?' : `${m.duration} ms`}`).join(', ');
-    const problems = agent.problems.map((p) => (p.startsWith('error') ? `error${agent.errorType ? ` (${agent.errorType})` : ''}, see log` : p));
+    const shownError = agent.errorDetails ? errorProblem(agent.errorType, agent.errorDetails, true) : null;
+    const problems = agent.problems.map((p) => (p === shownError ? `error${agent.errorType ? ` (${agent.errorType})` : ''}, see log` : p));
     return `| ${cell(agent.agentId)} | ${cell(agent.agentName)} | ${agent.ok ? 'pass' : 'FAIL'} | ${agent.transactionTime ?? ''} | ${cell(markers)} | ${cell(problems.join('; '))} |`;
   });
   return [
@@ -549,6 +679,30 @@ export function formatStepSummary(run, { testId, scriptPath }) {
 }
 
 /* ───────────── Command line ───────────── */
+
+async function runAndReport({ config, body, env, fetchImpl, sleep, now, out }) {
+  out(`Running ${config.scriptPath} on agent(s) ${config.agentIds.join(', ')} against ${config.url}`);
+  let result;
+  try {
+    result = await runInstantTest({ config, body, fetchImpl, sleep, now, log: (line) => out(line) });
+  } catch (err) {
+    out(`error: ${oneLine(err && err.message || err)}`);
+    return EXIT.error;
+  }
+
+  const run = evaluateRun({ ...config, rounds: result.rounds });
+  if (result.timedOut && result.lastError) out(`last polling error: ${oneLine(result.lastError.message)}`);
+  out(...formatSummary(run, { ...config, testId: result.testId }));
+
+  if (env.GITHUB_STEP_SUMMARY) {
+    try {
+      appendFileSync(env.GITHUB_STEP_SUMMARY, formatStepSummary(run, { testId: result.testId, scriptPath: config.scriptPath }));
+    } catch (err) {
+      out(`warning: cannot write the job summary: ${oneLine(err.message)}`);
+    }
+  }
+  return run.ok ? EXIT.pass : EXIT.fail;
+}
 
 /**
  * @param {{ argv?: string[], env?: object, fetchImpl?: typeof fetch, sleep?: (ms: number) => Promise<void>,
@@ -593,37 +747,18 @@ export async function main({
     return EXIT.pass;
   }
 
-  const inActions = env.GITHUB_ACTIONS === 'true';
-  if (inActions) {
-    // The target server's name appears in console logs and errors; keep it out of public logs.
-    out(`::add-mask::${config.url}`, `::add-mask::${targetHost(config.url)}`);
-  }
-  out(`Running ${config.scriptPath} on agent(s) ${config.agentIds.join(', ')} against ${config.url}`);
+  if (!config.inActions) return runAndReport({ config, body, env, fetchImpl, sleep, now, out });
 
-  let result;
+  // GitHub Actions. The target's name turns up in console logs and errors: mask it first. Then
+  // fence everything that follows, since API and agent text can look like workflow commands.
+  out(`::add-mask::${escapeCommandData(config.url)}`, `::add-mask::${escapeCommandData(targetHost(config.url))}`);
+  const stopToken = randomUUID();
+  out(`::stop-commands::${stopToken}`);
   try {
-    result = await runInstantTest({ config, body, fetchImpl, sleep, now, log: (line) => out(line) });
-  } catch (err) {
-    out(`error: ${oneLine(err && err.message || err)}`);
-    return EXIT.error;
+    return await runAndReport({ config, body, env, fetchImpl, sleep, now, out });
+  } finally {
+    out(`::${stopToken}::`);
   }
-
-  const run = evaluateRun({ ...config, rounds: result.rounds });
-  if (result.timedOut && result.lastError) out(`last polling error: ${oneLine(result.lastError.message)}`);
-  // Agent output can contain anything, including text that looks like a workflow command.
-  const stopToken = inActions ? randomUUID() : null;
-  if (stopToken) out(`::stop-commands::${stopToken}`);
-  out(...formatSummary(run, { ...config, testId: result.testId }));
-  if (stopToken) out(`::${stopToken}::`);
-
-  if (env.GITHUB_STEP_SUMMARY) {
-    try {
-      appendFileSync(env.GITHUB_STEP_SUMMARY, formatStepSummary(run, { testId: result.testId, scriptPath: config.scriptPath }));
-    } catch (err) {
-      out(`warning: cannot write the job summary: ${err.message}`);
-    }
-  }
-  return run.ok ? EXIT.pass : EXIT.fail;
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {

@@ -27,7 +27,7 @@ async function runFacts(config) {
 }
 
 describe('runtime facts script', () => {
-  it('reports settings, markers, socket methods, read() at end of stream and setTimeout()', async () => {
+  it('reports settings, markers, credentials, socket methods, read() at end of stream and setTimeout()', async () => {
     const server = await startFakeLdap();
     try {
       const { exitCode, facts, stderr } = await runFacts({
@@ -46,6 +46,10 @@ describe('runtime facts script', () => {
       assert.equal(facts.markers.restartAfterStop.threw, true);
       assert.equal(facts.markers.stopNeverStarted.threw, true);
 
+      // The stub throws for a credential that is not associated with the test.
+      assert.equal(facts.credentials.unassociated.threw, true);
+      assert.match(facts.credentials.unassociated.error.message, /not associated/);
+
       assert.equal(facts.socket.methods.read, 'function');
       assert.equal(facts.socket.methods.setTimeout, 'function');
       assert.equal(facts.socket.methods.getPeerCertificate, 'undefined', 'plain sockets have no certificate');
@@ -54,10 +58,12 @@ describe('runtime facts script', () => {
       assert.equal(facts['read-at-end'].reads[0].outcome, 'resolved');
       assert.equal(facts['read-at-end'].reads[0].value, 'null');
 
-      // With enforceSocketTimeout the stub rejects an idle read after the timeout.
+      // With enforceSocketTimeout the stub applies Node's idle timeout, in milliseconds:
+      // setTimeout(2) rejects the idle read after about 2 ms.
+      assert.equal(facts.setTimeout.argument, 2);
       assert.equal(facts.setTimeout.read.outcome, 'rejected');
       assert.equal(facts.setTimeout.read.error.code, 'ETIMEDOUT');
-      assert.ok(facts.setTimeout.read.afterMs < 5000);
+      assert.equal(facts.setTimeout.unit, 'milliseconds');
 
       assert.ok(facts.done);
     } finally {

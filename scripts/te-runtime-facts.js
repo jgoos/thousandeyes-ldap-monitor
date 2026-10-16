@@ -8,12 +8,16 @@
  * no certificate check (it reports on the runtime, not on the server).
  *
  * Each fact is one console line, `runtime-fact <name>: <JSON>`. Values are described by type and
- * size, not content; only error messages are quoted.
+ * size, not content; only error messages are quoted, in `message` fields, which
+ * scripts/te-instant-test.mjs hides unless TE_SHOW_DETAILS is set.
  */
-import { markers, net, test } from 'thousandeyes';
+import { credentials, markers, net, test } from 'thousandeyes';
 
 const UNBIND_REQUEST = [0x30, 0x05, 0x02, 0x01, 0x01, 0x42, 0x00]; // LDAPMessage: messageID 1, UnbindRequest
-const IDLE_TIMEOUT_MS = 1500; // the socket idle timeout under test
+// sock.setTimeout(2): about 2 ms if the unit is milliseconds (as in Node), about 2 s if seconds.
+const IDLE_TIMEOUT_ARG = 2;
+const MS_UNIT_BELOW_MS = 1000; // a read ended sooner than this: milliseconds
+const UNASSOCIATED_CREDENTIAL = 'rt-unassociated-credential'; // never attached to the test
 const READ_WAIT_MS = 6000; // a read still unsettled after this long counts as pending
 const CONNECT_WAIT_MS = 8000;
 const CLEANUP_WAIT_MS = 2000;
@@ -97,6 +101,16 @@ function markerFacts() {
   fact('markers', { start, stop, restartAfterStop: restart, stopNeverStarted });
 }
 
+/** credentials.get() for a credential not attached to the test: throws, or returns a value. */
+function credentialFacts() {
+  try {
+    const value = credentials.get(UNASSOCIATED_CREDENTIAL);
+    fact('credentials', { unassociated: { threw: false, returned: describe(value) } });
+  } catch (err) {
+    fact('credentials', { unassociated: { threw: true, error: errorInfo(err) } });
+  }
+}
+
 function parseTarget(url) {
   const match = /^(ldaps?):\/\/(\[[^\]]+\]|[^:/?#]+)(?::(\d+))?/i.exec(url);
   if (!match) return null;
@@ -156,7 +170,15 @@ async function readAtEndFacts(target) {
   await close(sock, { unbind: false });
 }
 
-/** Whether sock.setTimeout() ends a read on an idle connection (an LDAP server sends nothing unasked). */
+/**
+ * Whether sock.setTimeout() ends a read on an idle connection (an LDAP server sends nothing
+ * unasked), and in which unit: setTimeout(2) ends it after about 2 ms or about 2 s.
+ */
+const timeoutUnit = (read) => {
+  if (read.outcome === 'pending') return 'not enforced';
+  return read.afterMs < MS_UNIT_BELOW_MS ? 'milliseconds' : 'seconds';
+};
+
 async function setTimeoutFacts(target) {
   const sock = await connect(target, 'set-timeout');
   if (!sock) return;
@@ -167,20 +189,21 @@ async function setTimeoutFacts(target) {
   }
   let returned;
   try {
-    returned = describe(sock.setTimeout(IDLE_TIMEOUT_MS));
+    returned = describe(sock.setTimeout(IDLE_TIMEOUT_ARG));
   } catch (err) {
     fact('setTimeout', { present: true, threw: errorInfo(err) });
     await close(sock);
     return;
   }
   const read = await within(() => sock.read(), READ_WAIT_MS);
-  fact('setTimeout', { present: true, idleTimeoutMs: IDLE_TIMEOUT_MS, returned, read: report(read) });
+  fact('setTimeout', { present: true, argument: IDLE_TIMEOUT_ARG, unit: timeoutUnit(read), returned, read: report(read) });
   await close(sock);
 }
 
 async function runtimeFacts() {
   const start = Date.now();
   markerFacts();
+  credentialFacts();
   const url = settingsFacts();
   const target = parseTarget(url);
   fact('target', target ? { parsed: true, tls: target.tls, port: target.port } : { parsed: false });
