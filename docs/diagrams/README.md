@@ -108,7 +108,7 @@ This removes:
 ## 🔧 Technical Details
 
 ### Dependencies
-- Python 3.7+
+- Python 3.9+ (the floor of `requirements.txt`: `pillow>=11.0.0` needs 3.9)
 - `diagrams` library
 - `graphviz` system package
 - `pillow` for image processing
