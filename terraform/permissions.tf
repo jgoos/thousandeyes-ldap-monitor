@@ -1,5 +1,5 @@
 resource "thousandeyes_role" "monitoring_config_admin" {
-  name        = "Monitoring Administrator"
+  name = "Monitoring Administrator"
   permissions = [
     "View tests",
     "Edit tests and run instant tests",

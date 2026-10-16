@@ -369,11 +369,27 @@ Best practices for alerting:
    - Group LDAP alerts by data center or region
    - Correlate with application alerts that depend on LDAP
 
+## Development and Testing
+
+The test harness runs the deployable `ldap-monitor.js` unmodified under Node, with a local stand-in for the ThousandEyes `thousandeyes` module. Requires Node.js 22.15 or later.
+
+```bash
+npm ci
+npm test                  # scripted LDAP server scenarios, no network access needed
+npm run test:integration  # real 389 Directory Server container (podman or docker)
+npm run lint
+```
+
+- `test/support/thousandeyes-stub.js` is the stand-in runtime. It follows documented ThousandEyes behaviour: markers throw when restarted or stopped twice, `test.getSettings().timeout` is in seconds, and credentials must be associated with the test. Where the vendor docs are silent (`socket.read()` at end of stream, `socket.setTimeout()`), it makes the assumptions listed at the top of the file. Confirm those with an instant test on a real agent.
+- `test/support/fake-ldap-server.js` plays back scripted LDAP responses, such as long-form BER lengths, split TCP segments, a Notice of Disconnection, and slow replies.
+- Tests marked `todo` describe the correct behaviour for a known bug. They fail today without failing the run. Remove `todo` in the change that fixes the bug.
+- CI (`.github/workflows/ci.yml`) runs lint and unit tests on Node 22 and 24, the 389 DS integration test, and `terraform fmt` and `validate`.
+
 ## Contributing
 
 To contribute improvements to this monitoring script:
 
-1. Test changes thoroughly in your environment
+1. Run `npm run lint`, `npm test` and `npm run test:integration`, and test changes in your environment
 2. Document any new configuration options
 3. Include examples for different LDAP server types
 4. Submit pull requests with clear descriptions
