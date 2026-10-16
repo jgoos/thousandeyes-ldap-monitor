@@ -496,8 +496,20 @@ function parseLdapUrl(url) {
   if (!match) throw configError(`the test URL "${text}" is not a valid LDAP URL`);
   const [, scheme, rawHost, rawPort, rawDN = '', query = ''] = match;
   const tls = scheme.toLowerCase() === 'ldaps';
-  const host = rawHost.replace(/^\[|\]$/g, '');
-  if (!host) throw configError(`the test URL "${text}" has no host`);
+  if (!rawHost) throw configError(`the test URL "${text}" has no host`);
+  // A registered name may be percent-encoded (RFC 3986 section 3.2.2); an IPv6 literal sits in brackets.
+  let host;
+  if (rawHost.startsWith('[')) {
+    host = rawHost.slice(1, -1);
+    if (!/^[0-9A-Fa-f:.]+$/.test(host)) throw configError(`the test URL "${text}" has an invalid IPv6 address`);
+  } else {
+    try {
+      host = decodeURIComponent(rawHost);
+    } catch {
+      throw configError(`the host in the test URL "${text}" has invalid percent-encoding`);
+    }
+    if (!/^[A-Za-z0-9._-]+$/.test(host)) throw configError(`the test URL "${text}" has an invalid host name`);
+  }
   const port = rawPort ? Number(rawPort) : (tls ? 636 : 389);
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw configError(`the test URL "${text}" has an invalid port`);
   if (query.slice(1).split('?').some((part) => part !== '')) {

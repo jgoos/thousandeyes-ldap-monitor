@@ -384,6 +384,12 @@ describe('target and search base', () => {
     assert.match(result.stdout, /Warning: sending the bind password to \[::1\]:389 without TLS/);
   });
 
+  it('decodes a percent-encoded host name (RFC 3986 3.2.2)', async () => {
+    const result = await probeUrl('ldap://ldap%2Etest:389');
+    assert.equal(result.verdict, 'pass', result.failure ?? '');
+    assert.deepEqual(eventsOf(result, 'connect').map((e) => e.host), ['ldap.test']);
+  });
+
   it('falls back to the ldapHost credential when the test URL is not an LDAP URL', async () => {
     const result = await probeUrl('https://www.example.com/', { credentials: { ldapHost: 'ldap.test', ldapPort: '389' } });
     assert.equal(result.verdict, 'pass', result.failure ?? '');
@@ -407,6 +413,9 @@ describe('target and search base', () => {
     ['ldap:///dc=example', /has no host/],
     ['ldap://ldap.test:99999', /invalid port/],
     ['ldap://ldap.test/ou=%E0%A4%A', /invalid percent-encoding/],
+    ['ldap://ldap%ZZtest', /host .* invalid percent-encoding/],
+    ['ldap://ldap%20test', /invalid host name/],
+    ['ldap://[not-an-ip]', /invalid IPv6 address/],
   ]) {
     it(`rejects the test URL ${url}`, async () => {
       const result = await probeUrl(url);
