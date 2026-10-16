@@ -5,7 +5,7 @@
 // fixed; `node --test` reports them without failing the run. Remove `todo` when fixing a bug.
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { TAG, ldap } from './support/ber.js';
+import { TAG, ldap, tlv } from './support/ber.js';
 import { startFakeLdap } from './support/fake-ldap-server.js';
 import { eventsOf, runProbe } from './support/run-probe.js';
 import { createTlsFixture } from './support/tls-fixture.js';
@@ -115,7 +115,7 @@ describe('bind', () => {
     });
   }
 
-  it('fails on invalidCredentials from a BindResponse with long-form lengths (B1)', { todo: 'B1: result code read at a fixed offset' }, async () => {
+  it('fails on invalidCredentials from a BindResponse with long-form lengths (B1)', async () => {
     const result = await probe(
       { bind: () => [ldap.bindResponse(1, 49, { diagnostic: 'data 52e', longForm: true })] },
       { credentials: { ldapBindOnly: 'true' } },
@@ -124,7 +124,7 @@ describe('bind', () => {
     assert.match(result.failure, /invalidCredentials/);
   });
 
-  it('includes the server diagnosticMessage in the failure (B21)', { todo: 'B21: diagnosticMessage not surfaced' }, async () => {
+  it('includes the server diagnosticMessage in the failure (B21)', async () => {
     const result = await probe(
       { bind: () => [ldap.bindResponse(1, 49, { diagnostic: 'AcceptSecurityContext error, data 52e' })] },
       { credentials: { ldapBindOnly: 'true' } },
@@ -132,7 +132,7 @@ describe('bind', () => {
     assert.match(result.failure, /data 52e/);
   });
 
-  it('handles a BindResponse split across TCP segments (B15)', { todo: 'B15: single read() for the bind' }, async () => {
+  it('handles a BindResponse split across TCP segments (B15)', async () => {
     const response = ldap.bindResponse(1, 0);
     const result = await probe(
       { bind: () => [response.subarray(0, 4), { waitMs: 50 }, response.subarray(4)] },
@@ -154,21 +154,25 @@ describe('search', () => {
     assert.equal(searchReq.messageId, 2);
     assert.equal(searchReq.baseObject, DN);
     assert.equal(searchReq.scope.value, 0);
+    assert.equal(searchReq.derefAliases.value, 0);
+    assert.equal(searchReq.sizeLimit, 1);
+    assert.equal(searchReq.timeLimit, 5);
+    assert.equal(searchReq.typesOnly, false);
     assert.equal(searchReq.filterTag, 0x87);
   });
 
-  it('does not attribute a normal pass to "response corruption" (B2/S1)', { todo: 'B2: verdict comes from a fixed offset plus a corruption heuristic' }, async () => {
+  it('does not attribute a normal pass to "response corruption" (B2/S1)', async () => {
     const result = await probe({ bind: bindOk, search: () => [entry(), ldap.searchDone(2, 0)] });
     assert.equal(result.verdict, 'pass');
     assert.doesNotMatch(result.stdout, /corrupt/i);
   });
 
-  it('passes when SearchResultDone (success) arrives without entries (B2)', { todo: 'B2: reports "Operations error"' }, async () => {
+  it('passes when SearchResultDone (success) arrives without entries (B2)', async () => {
     const result = await probe({ bind: bindOk, search: () => [ldap.searchDone(2, 0)] });
     assert.equal(result.verdict, 'pass');
   });
 
-  it('passes when a short entry and SearchResultDone share one segment (B2)', { todo: 'B2: reports "Unexpected response type"' }, async () => {
+  it('passes when a short entry and SearchResultDone share one segment (B2)', async () => {
     const result = await probe({
       bind: bindOk,
       search: () => [Buffer.concat([ldap.searchEntry(2, DN, { cn: ['monitor'] }), ldap.searchDone(2, 0)])],
@@ -176,7 +180,7 @@ describe('search', () => {
     assert.equal(result.verdict, 'pass');
   });
 
-  it('fails when SearchResultDone after an entry carries an error (B2/B3)', { todo: 'B3: stops reading after the first PDU' }, async () => {
+  it('fails when SearchResultDone after an entry carries an error (B2/B3)', async () => {
     const result = await probe({
       bind: bindOk,
       search: () => [entry(), { waitMs: 50 }, ldap.searchDone(2, 11, { diagnostic: 'admin limit exceeded' })],
@@ -186,33 +190,33 @@ describe('search', () => {
   });
 
   for (const [code, name] of [[51, 'busy'], [32, 'noSuchObject'], [50, 'insufficientAccessRights']]) {
-    it(`reports ${name} (${code}) from SearchResultDone (B2)`, { todo: 'B2: every short Done is reported as "Operations error"' }, async () => {
+    it(`reports ${name} (${code}) from SearchResultDone (B2)`, async () => {
       const result = await probe({ bind: bindOk, search: () => [ldap.searchDone(2, code)] });
       assert.equal(result.verdict, 'fail');
       assert.match(result.failure, new RegExp(name));
     });
   }
 
-  it('reports a Notice of Disconnection as such (B2/B14)', { todo: 'B2: messageID 0 / ExtendedResponse not handled' }, async () => {
+  it('reports a Notice of Disconnection as such (B2)', async () => {
     const result = await probe({ bind: bindOk, search: () => [ldap.noticeOfDisconnection(52, 'shutting down'), { close: true }] });
     assert.equal(result.verdict, 'fail');
     assert.match(result.failure, /disconnect|unavailable/i);
   });
 
-  it('fails a search slower than slowMs on every response path (B6)', { todo: 'B6: some success paths skip the threshold' }, async () => {
+  it('fails a search slower than slowMs on every response path (B6)', async () => {
     const result = await probe({ bind: bindOk, search: () => [{ waitMs: 400 }, entry(), ldap.searchDone(2, 0)] });
     assert.equal(result.verdict, 'fail');
     assert.match(result.failure, /Slow search/);
   });
 
-  it('encodes scope and derefAliases as ENUMERATED (RFC 4511 4.5.1) (B14)', { todo: 'B14: sent as INTEGER' }, async () => {
+  it('encodes scope and derefAliases as ENUMERATED (RFC 4511 4.5.1) (B14)', async () => {
     const result = await probe({ bind: bindOk, search: () => [ldap.searchDone(2, 0)] });
     const [searchReq] = requestsOf(result, TAG.searchRequest);
     assert.equal(searchReq.scope.tag, TAG.enumerated);
     assert.equal(searchReq.derefAliases.tag, TAG.enumerated);
   });
 
-  it('requests no attributes ("1.1") so no entry data is returned (B16/S3)', { todo: 'B16: empty list requests all user attributes' }, async () => {
+  it('requests no attributes ("1.1") so no entry data is returned (B16/S3)', async () => {
     const result = await probe({ bind: bindOk, search: () => [ldap.searchDone(2, 0)] });
     const [searchReq] = requestsOf(result, TAG.searchRequest);
     assert.deepEqual(searchReq.attributes, ['1.1']);
@@ -227,9 +231,84 @@ describe('search', () => {
     assert.equal(searchReq.baseObject, 'dc=example,dc=com');
   });
 
-  it('sends an UnbindRequest before closing (RFC 4511 4.3) (B26)', { todo: 'B26: no UnbindRequest' }, async () => {
+  it('sends an UnbindRequest before closing (RFC 4511 4.3) (B26)', async () => {
     const result = await probe({ bind: bindOk }, { credentials: { ldapBindOnly: 'true' } });
     assert.equal(requestsOf(result, TAG.unbindRequest).length, 1);
+  });
+});
+
+describe('response framing and decoding', () => {
+  const bindOnly = { credentials: { ldapBindOnly: 'true' } };
+
+  it('passes with valid credentials when every length uses the 4-byte long form', async () => {
+    const longForm = { longForm: true };
+    const result = await probe({
+      bind: () => [ldap.bindResponse(1, 0, longForm)],
+      search: () => [ldap.searchEntry(2, DN, {}, longForm), ldap.searchDone(2, 0, longForm)],
+    });
+    assert.equal(result.verdict, 'pass', result.failure ?? '');
+  });
+
+  it('reassembles a search response delivered in small segments', async () => {
+    const response = Buffer.concat([entry(), ldap.searchDone(2, 0)]);
+    const segments = [];
+    for (let i = 0; i < response.length; i += 7) segments.push(response.subarray(i, i + 7), { waitMs: 1 });
+    const result = await probe({ bind: bindOk, search: () => segments });
+    assert.equal(result.verdict, 'pass', result.failure ?? '');
+  });
+
+  it('skips SearchResultReference and IntermediateResponse before SearchResultDone', async () => {
+    const reference = ldap.message(2, tlv(0x73, tlv(0x04, Buffer.from('ldap://other.test/dc=example,dc=com'))));
+    const intermediate = ldap.message(2, tlv(0x79, Buffer.alloc(0)));
+    const result = await probe({ bind: bindOk, search: () => [reference, intermediate, ldap.searchDone(2, 0)] });
+    assert.equal(result.verdict, 'pass', result.failure ?? '');
+  });
+
+  it('fails on a response for an unexpected message ID', async () => {
+    const result = await probe({ bind: () => [ldap.bindResponse(7, 0)] }, bindOnly);
+    assert.equal(result.verdict, 'fail');
+    assert.match(result.failure, /Bind failed: unexpected message ID 7/);
+  });
+
+  it('fails when the bind is answered with another operation', async () => {
+    const result = await probe({ bind: () => [ldap.searchDone(1, 0)] }, bindOnly);
+    assert.equal(result.verdict, 'fail');
+    assert.match(result.failure, /expected a BindResponse/);
+  });
+
+  it('fails on indefinite-length BER, which LDAP does not allow', async () => {
+    const result = await probe({ bind: () => [Buffer.from([0x30, 0x80, 0x02, 0x01, 0x01, 0x00, 0x00])] }, bindOnly);
+    assert.equal(result.verdict, 'fail');
+    assert.match(result.failure, /indefinite-length/);
+  });
+
+  it('fails at once on a declared length above the response size limit', async () => {
+    const result = await probe({ bind: () => [Buffer.from([0x30, 0x84, 0x7f, 0xff, 0xff, 0xff, 0x02])] }, bindOnly);
+    assert.equal(result.verdict, 'fail');
+    assert.match(result.failure, /exceeds the \d+-byte limit/);
+  });
+
+  it('fails on a reply that is not LDAP', async () => {
+    const result = await probe({ bind: () => [Buffer.from('HTTP/1.1 400 Bad Request\r\n\r\n')] }, bindOnly);
+    assert.equal(result.verdict, 'fail');
+    assert.match(result.failure, /not LDAP/);
+  });
+
+  it('fails when the server closes the connection before SearchResultDone', async () => {
+    const result = await probe({ bind: bindOk, search: () => [entry(), { close: true }] });
+    assert.equal(result.verdict, 'fail');
+    assert.match(result.failure, /Search failed: connection closed by the server/);
+  });
+
+  it('names unknown result codes without guessing', async () => {
+    const result = await probe({ bind: () => [ldap.bindResponse(1, 99)] }, bindOnly);
+    assert.equal(result.verdict, 'fail');
+    assert.match(result.failure, /Unknown LDAP result code 99 \(0x63\)/);
+  });
+
+  it('keeps the server diagnosticMessage on one line', async () => {
+    const result = await probe({ bind: () => [ldap.bindResponse(1, 49, { diagnostic: 'line one\nline two' })] }, bindOnly);
+    assert.match(result.failure, /server: "line one line two"/);
   });
 });
 
