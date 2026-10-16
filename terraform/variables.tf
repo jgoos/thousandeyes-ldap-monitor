@@ -64,8 +64,10 @@ variable "credential_ids" {
   description = <<-EOT
     IDs of the ThousandEyes credentials the script reads: ldapMonUser and ldapMonPass, plus any
     optional ones you use (ldapCaBase64, ldapAllowCleartext, ldapBaseDN, ldapBindOnly,
-    ldapDebugMode). Create them in the ThousandEyes UI or API rather than in Terraform, so their
-    values stay out of Terraform state.
+    ldapExpectedNamingContext, ldapMaxClockSkewSeconds, ldapCertWarnDays, ldapRequireEntry,
+    ldapHost, ldapPort, ldapDebugMode). The script sees only the credentials attached here.
+    Create them in the ThousandEyes UI or API rather than in Terraform, so their values stay out
+    of Terraform state.
   EOT
   type        = list(string)
 

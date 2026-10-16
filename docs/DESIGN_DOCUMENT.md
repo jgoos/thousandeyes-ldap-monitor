@@ -58,7 +58,7 @@ Purpose: Synthetic monitoring probes
 | AMER | `234567`, `234568` | `ldap-amer-01.example.com`, `ldap-amer-02.example.com` |
 | APAC | `345678`, `345679` | `ldap-apac-01.example.com`, `ldap-apac-02.example.com` |
 
-The Terraform in `terraform/` assigns one list of agents (`agent_ids`) to every test it creates. To keep agents in their region, apply it once per region, each with that region's servers and agents (separate state or workspace).
+The Terraform in `terraform/` assigns one list of agents (`agent_ids`) to every test it creates. To keep agents in their region, apply it once per region, each with that region's servers and agents (separate state or workspace). Caveat: every apply also creates the `ThousandEyes Monitoring Config` account group, and the `Monitoring Administrator` role where the configuration creates it, so per-region workspaces create duplicate account groups and roles, or name conflicts. Keep that RBAC in one workspace. The configuration cannot skip it yet; gating it is a follow-up (the role is becoming opt-in, but the account group is still always created).
 
 ### 3.2 Isolation Benefits
 
@@ -152,7 +152,7 @@ Terraform sets only email notifications and leaves severity at its default. Add 
 
 ### 6.1 Configuration
 
-`terraform/` is a root configuration, not a module. Run it from that directory once per region, with a variable file and a workspace per region (see the agent note in 3.1), for example `terraform workspace select -or-create emea` and then `terraform apply -var-file=emea.tfvars`. It needs Terraform 1.7 or later. The full variable list is in [terraform/README.md](../terraform/README.md).
+`terraform/` is a root configuration, not a module. Run it from that directory once per region, with a variable file and a workspace per region (see the agent note in 3.1), for example `terraform workspace select -or-create emea` and then `terraform apply -var-file=emea.tfvars`. Mind the RBAC caveat in 3.1: each workspace also creates the account group (and role). It needs Terraform 1.7 or later. The full variable list is in [terraform/README.md](../terraform/README.md).
 
 ```hcl
 # terraform/emea.tfvars
@@ -194,7 +194,7 @@ graph LR
 
 ### 7.2 Access Control Requirements
 
-- **Account Admin Role**: Required for test creation/modification
+- **Organization Admin Token**: The Terraform creates an account group (and a role), and managing account groups and roles requires an Organization Admin's API token
 - **API Token Scope**: Limited to specific account groups
 - **Approval Gates**: Security team sign-off for firewall changes
 

@@ -33,7 +33,7 @@ Follow these steps to configure LDAP monitoring in the ThousandEyes UI. To creat
 
 ### 1. Store Credentials Securely
 
-**Navigation:** `Settings ▸ Secure Credentials ▸ Add Credential`
+**Navigation:** `Network & App Synthetics ▸ Test Settings ▸ Credentials Repository ▸ Add New Credential`
 
 Create these two credentials:
 
@@ -51,7 +51,7 @@ Add any optional credentials from the [Credentials](#credentials) table, for exa
 
 ### 2. Create a New Test
 
-**Navigation:** `Test Settings → Add New Test` (top-right)
+**Navigation:** `Network & App Synthetics ▸ Test Settings ▸ Add New Test` (top-right)
 
 In the "Add New Test" pane:
 - Choose `Browser Synthetics → Transaction`
@@ -88,7 +88,7 @@ In the Script editor:
 - Select Enterprise Agent(s) that sit next to the LDAP server
 - Optionally add Cloud Agents for outside-in checks
 - **Interval:** 5 minutes is the Terraform default. A shorter interval detects outages sooner: with the default alert rule, an alert needs 2 failing rounds
-- **Time limit:** 30 seconds is the default. ThousandEyes caps it at half the interval. The script stops about 10% earlier (at least 1 second) so that its own timeout message is reported
+- **Time limit:** 30 seconds is the default. ThousandEyes caps it at half the interval or 180 seconds, whichever is lower. The script stops about 10% earlier (at least 1 second) so that its own timeout message is reported
 
 ### 6. Configure Alerting
 
@@ -96,7 +96,7 @@ The script fails a run only on errors; a slow bind or search passes. Latency ale
 
 **Failure rule:**
 1. `Manage ▸ Alert Rules`, **Cloud & Enterprise Agents** tab, add a rule with Alert Type **Web ▸ Transaction**
-2. Under **Alert Conditions**, choose **Transaction**, and alert when the transaction completes with an error or times out. As an API or Terraform expression: `((txCompletionHasError == true) || (txCompletionTimedOut == true))`
+2. Under **Alert Conditions**, choose **Transaction**, add two conditions, one for a transaction that completes with an error and one for a transaction that times out, and set the rule to match **Any** of them (OR), not all. As an API or Terraform expression: `((txCompletionHasError == true) || (txCompletionTimedOut == true))`
 3. Require 2 failing rounds out of 5 (Terraform's default), and add notifications
 4. Associate the rule with the LDAP test(s) and agents, and enable alerts on the test
 
@@ -106,7 +106,7 @@ The script fails a run only on errors; a slow bind or search passes. Latency ale
 3. Repeat for `ldap-search`, and optionally for `ldaps-ssl-handshake` (LDAPS) or `ldap-tcp-connect` (plain LDAP). See [Markers](#markers)
 4. Associate each rule with the LDAP test(s) and agents
 
-> **Upgrading from a version with `slowMs`:** earlier versions of the script failed a run when the bind or search took longer than `slowMs` (300 ms). That check is gone, so a slow server no longer raises the failure alert. Create the latency rules above to keep latency alerts. Terraform creates them from `marker_alert_thresholds_ms` (default 300 ms for `ldap-bind` and `ldap-search`).
+> **Upgrading from a version with `slowMs`?** A slow bind or search no longer fails the run, so create the latency rules above to keep latency alerts. See [Upgrading from earlier versions](#upgrading-from-earlier-versions) for the other changes.
 
 ### 7. Test the Configuration
 
@@ -125,6 +125,19 @@ Click `Create New Test` - data starts flowing immediately.
 `terraform/` creates one transaction test per LDAP server, each with an LDAP URL built from `hostname`, `port`, `tls` and `base_dn`, plus the failure alert rule and one latency alert rule per entry in `marker_alert_thresholds_ms`. It needs Terraform 1.7 or later, because `terraform test` uses provider mocking, and pins the ThousandEyes provider to an exact version. The credentials are created outside Terraform and attached by ID (`credential_ids`), so their values stay out of Terraform state. Variables, examples and the alert expressions are in [terraform/README.md](terraform/README.md).
 
 Terraform can optionally create a dedicated monitoring user with a least-privilege role (`monitoring_user`); see [terraform/README.md](terraform/README.md#monitoring-user-and-role).
+
+## Upgrading from earlier versions
+
+Earlier versions of the script (those with `slowMs`) behaved differently in ways that can change a test's result:
+
+- **Latency no longer fails the run.** `slowMs` (300 ms) is gone. Create latency alert rules on the markers (see [6. Configure Alerting](#6-configure-alerting)); Terraform creates them from `marker_alert_thresholds_ms`.
+- **The search base moved from the bind DN to the Root DSE.** Earlier versions always searched the bind account's own entry. Now the search reads the Root DSE, unless the test URL has a DN path or, without a path, `ldapBaseDN` is set (see [Target and search base](#target-and-search-base)). To keep searching the account's entry, put its DN in the URL, for example `ldaps://ldap.example.com/cn=monitor,ou=svc,dc=example,dc=com`.
+- **Root DSE checks can fail a run** with `ROOTDSE:`: a server clock more than 300 s from the agent clock, an Active Directory `isSynchronized` of `FALSE`, or a `supportedLDAPVersion` without 3. Set `ldapMaxClockSkewSeconds` to `0` (or higher) to turn off or relax the skew check. The checks run only on a Root DSE search, so a base DN (in the URL or `ldapBaseDN`) or `ldapBindOnly` skips all of them.
+- **Plain LDAP is refused.** An `ldap://` URL or port 389 fails with `CONFIG:` unless `ldapAllowCleartext` is set.
+- **The target comes from the test URL** when it is an `ldap://` or `ldaps://` URL; `ldapHost` and `ldapPort` are used only otherwise. With neither, the run fails with `CONFIG:` instead of trying `ldap.example.com`.
+- **`ldapPort` is validated.** Anything but `389` or `636` fails with `CONFIG:`. Before, `abc` or `0` silently meant 636, and `389x` meant 389.
+- **Only `ldapBaseDN` is read.** The spellings `ldapbasedn`, `LdapBaseDN`, `LDAPBASEDN`, `ldap_base_dn` and `LDAP_BASE_DN` are no longer read. They never had an effect: earlier versions searched the bind DN whatever the base DN credential said.
+- **Failure messages changed.** Each now starts with its class (see [Failure classes](#failure-classes)). Update anything that matches on the old text, such as `Bind failed:` or `Slow bind:`.
 
 ## Script Configuration
 
@@ -146,7 +159,7 @@ Terraform always builds a URL with a `/` path, so set `base_dn` there; an `ldapB
 | `ldapMonUser` | (required) | Full bind DN of the monitoring account |
 | `ldapMonPass` | (required) | Its password |
 | `ldapCaBase64` | system CAs | CA certificate(s) for LDAPS, as PEM text or base64-encoded PEM. See [CA Certificate Configuration](#ca-certificate-configuration) |
-| `ldapHost`, `ldapPort` | (unset), `636` | Server and port when the test URL is not an LDAP URL. See [Target and search base](#target-and-search-base) |
+| `ldapHost`, `ldapPort` | (unset), `636` | Server and port when the test URL is not an LDAP URL. `ldapPort` must be `389` or `636`; anything else, including a value that is not a whole number, is a `CONFIG` error. See [Target and search base](#target-and-search-base) |
 | `ldapBaseDN` | Root DSE | Search base when the test URL has no `/` path |
 | `ldapAllowCleartext` | off | Allow the bind over plain LDAP. Without it, a plain-LDAP target fails with a `CONFIG` error before connecting (RFC 4513 section 5.1.3) |
 | `ldapBindOnly` | off | Skip the search; the run passes after a successful bind |
@@ -156,7 +169,7 @@ Terraform always builds a URL with a `/` path, so set `base_dn` there; an `ldapB
 | `ldapRequireEntry` | off | Fail a search that returns no entry. See below |
 | `ldapDebugMode` | off | Verbose output. See [Debug Mode](#debug-mode) |
 
-On/off credentials (`ldapAllowCleartext`, `ldapBindOnly`, `ldapRequireEntry`) accept `true`, `1` or `yes` in any letter case; `ldapDebugMode` accepts exactly `true`. Number credentials must be whole numbers, or the run fails with a `CONFIG` error.
+On/off credentials (`ldapAllowCleartext`, `ldapBindOnly`, `ldapRequireEntry`) accept `true`, `1` or `yes` in any letter case; `ldapDebugMode` accepts exactly `true`. Number credentials (`ldapPort`, `ldapMaxClockSkewSeconds`, `ldapCertWarnDays`) must be whole numbers, or the run fails with a `CONFIG` error.
 
 **Why `ldapRequireEntry` is opt-in:** a server may answer a base-scope search with success and no entry instead of `noSuchObject`. 389 Directory Server does this for a base DN that does not exist when the account can read only its own entry. So without `ldapRequireEntry`, a missing base DN can pass. Set it when the monitoring account can read the base entry, so that a missing or unreadable base DN fails the run.
 
@@ -196,7 +209,7 @@ LDAP Monitor: PASS (Bind-Only) - Total 35ms (connect: 21ms, bind: 14ms)
 
 The notes after the timings appear only when they apply: `certificate expires in N days` when the LDAPS certificate expires within `ldapCertWarnDays`, and, from the Root DSE, `vendorVersion: …` and `clock skew: ±N s` when the server publishes `vendorVersion` and `currentTime` (Active Directory publishes `currentTime`).
 
-Other lines: `Establishing LDAPS connection with …` and `TLS cipher: …; peer CN: …` for LDAPS, `Connection attempt N failed: …` for each failed connect attempt, and `Warning: …` lines for a certificate that expires soon or a cleartext bind.
+Other lines: `Establishing LDAPS connection with …` and `TLS cipher: …; peer CN: …` for LDAPS, `Connection attempt N failed: …` for each failed connect attempt, `Certificate/TLS error on attempt N: …` before a `TLS:` failure, and `Warning: …` lines for a certificate that expires soon or a cleartext bind.
 
 ### Failure classes
 
@@ -209,7 +222,7 @@ A failed run throws one line that starts with its class; the console shows it as
 | `TLS:` | The TLS handshake or certificate verification failed |
 | `TIMEOUT:` | A connect or a server response took longer than the time limit allows |
 | `BIND:`, `SEARCH:` | A protocol error during that operation, such as the server closing the connection |
-| `BIND rc=N <name>:`, `SEARCH rc=N <name>:` | The server returned that LDAP result code, for example `BIND rc=49 invalidCredentials:` |
+| `BIND rc=N <name>:`, `SEARCH rc=N <name>:` | The server returned that LDAP result code, for example `BIND rc=49 invalidCredentials:`. A code the script does not know reads `BIND rc=N: Unknown LDAP result code (0x..)` |
 | `ROOTDSE:` | The Root DSE reports a problem; every problem found is on the same line |
 
 ## Requirements
@@ -227,7 +240,7 @@ A failed run throws one line that starts with its class; the console shows it as
 **Cause:** The required secure credentials are not properly configured or not accessible to the test.
 
 **Solution:**
-1. Verify credentials exist in `Settings ▸ Secure Credentials`
+1. Verify credentials exist in `Network & App Synthetics ▸ Test Settings ▸ Credentials Repository`
 2. Check that credential names match exactly: `ldapMonUser` and `ldapMonPass`
 3. Verify credential access is enabled in the script editor (key icon), or that their IDs are in Terraform's `credential_ids`
 
@@ -329,7 +342,7 @@ marker_alert_thresholds_ms = {
 }
 ```
 
-Every test in one Terraform configuration carries the same latency rules. For different thresholds per server type, use separate configurations or workspaces.
+Every test in one Terraform configuration carries the same latency rules. For different thresholds per server type, use separate configurations or workspaces. Each apply also creates the `ThousandEyes Monitoring Config` account group (and the role, where the configuration creates it), so a second workspace creates duplicates or name conflicts; keep that RBAC in one workspace. The configuration cannot skip it yet: making it optional is a follow-up.
 
 #### Optimizing Search Operations
 The search is kept small:
@@ -460,8 +473,8 @@ npm run lint
 - `test/support/thousandeyes-stub.js` is the stand-in runtime. It follows documented ThousandEyes behaviour: markers throw when restarted or stopped twice, `test.getSettings().timeout` is in seconds, and credentials must be associated with the test. Where the vendor docs are silent, it makes the assumptions listed at the top of the file: `socket.read()` at end of stream, `socket.setTimeout()`, and TLS sockets with `getCipher()` and `getPeerCertificate()` as in Node's `tls` module. Its `peerCertificate` option (`'absent'`, `'throws'`, or a certificate object) covers a runtime without `getPeerCertificate()`, which the script feature-detects. Confirm those with the real-agent validation workflow (`runtime_facts` input); see docs/REAL_AGENT_VALIDATION.md.
 - `test/support/fake-ldap-server.js` plays back scripted LDAP responses, such as long-form BER lengths, split TCP segments, a Notice of Disconnection, and slow replies.
 - Tests marked `todo` describe the correct behaviour for a known bug. They fail today without failing the run. Remove `todo` in the change that fixes the bug.
-- CI (`.github/workflows/ci.yml`) runs lint, `npm run validate` and unit tests on Node 22 and 24, the 389 DS integration test, and `terraform fmt -check`, `terraform validate` and `terraform test`. A separate workflow runs the script on a real agent; see docs/REAL_AGENT_VALIDATION.md.
-- `.github/workflows/real-agent-validation.yml` runs `ldap-monitor.js` once on a real ThousandEyes agent as a web-transaction instant test (manual or nightly; never on pull requests). It skips until its secrets are set. Set-up and the stub assumptions it checks: [docs/REAL_AGENT_VALIDATION.md](docs/REAL_AGENT_VALIDATION.md).
+- CI (`.github/workflows/ci.yml`) runs lint, `npm run validate` and unit tests on Node 22 and 24, the 389 DS integration test, and `terraform fmt -check`, `terraform validate` and `terraform test`.
+- `.github/workflows/real-agent-validation.yml` runs `ldap-monitor.js` once on a real ThousandEyes agent as a web-transaction instant test (manual or nightly; never on pull requests). It skips until it is configured. Set-up and the stub assumptions it checks: [docs/REAL_AGENT_VALIDATION.md](docs/REAL_AGENT_VALIDATION.md).
 
 ## Contributing
 
