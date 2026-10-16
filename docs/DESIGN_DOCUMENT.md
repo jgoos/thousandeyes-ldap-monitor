@@ -152,7 +152,7 @@ Terraform sets only email notifications and leaves severity at its default. Add 
 
 ### 6.1 Configuration
 
-`terraform/` is a root configuration, not a module. Run it from that directory once per region, with a variable file and a workspace per region (see the agent note in 3.1), for example `terraform workspace select -or-create emea` and then `terraform apply -var-file=emea.tfvars`. Mind the RBAC note in 3.1: enable the role and user in one workspace only. It needs Terraform 1.7 or later. The full variable list is in [terraform/README.md](../terraform/README.md).
+`terraform/` is a root configuration, not a module. Run it from that directory once per region, with a variable file and a workspace per region (see the agent note in 3.1), for example `terraform workspace select -or-create emea` and then `terraform apply -var-file=emea.tfvars`. Mind the RBAC note in 3.1: enable the role and user in one workspace only. It needs Terraform 1.9.3 or later. The full variable list is in [terraform/README.md](../terraform/README.md).
 
 ```hcl
 # terraform/emea.tfvars
@@ -194,7 +194,7 @@ graph LR
 
 ### 7.2 Access Control Requirements
 
-- **Least-privilege token**: with the defaults the token's user needs only the seven monitoring permissions (API access, view/edit tests, create web transaction tests, view/edit alert rules, view agents) in the tests' account group; only `monitoring_user` or `create_monitoring_role = true` needs an Organization Admin token
+- **Least-privilege token**: with the defaults the token's user needs only the seven monitoring permissions (API access, view/edit tests, create web transaction tests, view/edit alert rules, view agents) in the tests' account group, which are expected to be sufficient but not yet verified against a live account (if the API rejects the test expand options, also grant View tags and View BGP monitors); only `monitoring_user` or `create_monitoring_role = true` needs an Organization Admin token
 - **API Token Scope**: Limited to specific account groups
 - **Approval Gates**: Security team sign-off for firewall changes
 

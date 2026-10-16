@@ -122,9 +122,9 @@ Click `Create New Test` - data starts flowing immediately.
 
 ## Deploying with Terraform
 
-`terraform/` creates one transaction test per LDAP server, each with an LDAP URL built from `hostname`, `port`, `tls` and `base_dn`, plus the failure alert rule and one latency alert rule per entry in `marker_alert_thresholds_ms`. It needs Terraform 1.7 or later ([terraform/README.md](terraform/README.md) gives the version `terraform test` needs) and pins the ThousandEyes provider to an exact version. The credentials are created outside Terraform and attached by ID (`credential_ids`), so their values stay out of Terraform state. Variables, examples and the alert expressions are in [terraform/README.md](terraform/README.md).
+`terraform/` creates one transaction test per LDAP server, each with an LDAP URL built from `hostname`, `port`, `tls` and `base_dn`, plus the failure alert rule and one latency alert rule per entry in `marker_alert_thresholds_ms`. It needs Terraform 1.9.3 or later ([terraform/README.md](terraform/README.md) gives the version `terraform test` needs) and pins the ThousandEyes provider to an exact version. The credentials are created outside Terraform and attached by ID (`credential_ids`), so their values stay out of Terraform state. Variables, examples and the alert expressions are in [terraform/README.md](terraform/README.md).
 
-Terraform can optionally create a dedicated monitoring user with a least-privilege role (`monitoring_user`, `create_monitoring_role`); see [terraform/README.md](terraform/README.md#monitoring-user-and-role). With the defaults it creates neither, and its API token needs no Organization Admin: only the monitoring permissions in the tests' account group.
+Terraform can optionally create a dedicated monitoring user with a least-privilege role (`monitoring_user`, `create_monitoring_role`); see [terraform/README.md](terraform/README.md#monitoring-user-and-role). With the defaults it creates neither, and its API token needs no Organization Admin: the seven monitoring permissions in the tests' account group are expected to be sufficient, though not yet verified against a live account. If the API rejects the test expand options, also grant View tags and View BGP monitors.
 
 ## Upgrading from earlier versions
 
@@ -230,7 +230,7 @@ A failed run throws one line that starts with its class; the console shows it as
 - ThousandEyes Enterprise or Cloud Agents
 - LDAP server with monitoring account credentials
 - Network connectivity from agents to LDAP server on configured port
-- For `terraform/`: Terraform 1.7 or later and a ThousandEyes API token
+- For `terraform/`: Terraform 1.9.3 or later and a ThousandEyes API token
 
 ## Troubleshooting
 
