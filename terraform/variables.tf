@@ -7,8 +7,8 @@ variable "te_api_token" {
 variable "monitoring_user" {
   description = <<-EOT
     Optional user that Terraform creates and gives the Monitoring Administrator role in the
-    ThousandEyes Monitoring Config account group. Null (the default) creates neither the user nor
-    the role.
+    ThousandEyes Monitoring Config account group. Null (the default) creates no user, and no role
+    unless create_monitoring_role is true.
     - email: a dedicated account, never the API token owner's or a person's. Terraform owns the
       user: the API replaces a user's role assignments as a whole, so this becomes the user's
       only one, and destroy deletes the user.
@@ -26,11 +26,22 @@ variable "monitoring_user" {
   }
 }
 
+variable "create_monitoring_role" {
+  description = <<-EOT
+    Whether to create the Monitoring Administrator role. Null (the default) creates it only with a
+    monitoring_user. true always creates it: set this when upgrading a configuration whose role
+    already exists, or Terraform deletes that role. false never creates it and cannot be combined
+    with monitoring_user.
+  EOT
+  type        = bool
+  default     = null
+}
+
 variable "monitoring_role_permissions" {
   description = <<-EOT
     Permissions of the Monitoring Administrator role, as UI label => API permission name. The
     provider resolves each name (the "permission" field of GET /v7/permissions, not the label)
-    to its ID. Used only when monitoring_user is set. README.md says what each permission is for
+    to its ID. Used only when the role is created. README.md says what each permission is for
     and how to list the names in your account.
   EOT
   type        = map(string)

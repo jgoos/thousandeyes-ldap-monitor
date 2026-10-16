@@ -4,7 +4,7 @@ output "monitoring_group_id" {
 }
 
 output "monitoring_role_id" {
-  description = "ID of the Monitoring Administrator role; null without monitoring_user"
+  description = "ID of the Monitoring Administrator role; null when the role is not created"
   value       = one(thousandeyes_role.monitoring_config_admin[*].role_id)
 }
 

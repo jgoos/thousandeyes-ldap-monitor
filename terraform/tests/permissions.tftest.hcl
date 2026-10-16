@@ -32,6 +32,47 @@ run "no_monitoring_user_creates_no_role_or_user" {
   }
 }
 
+run "create_monitoring_role_true_creates_the_role_without_a_user" {
+  command = plan
+
+  variables {
+    create_monitoring_role = true
+  }
+
+  assert {
+    condition     = length(thousandeyes_role.monitoring_config_admin) == 1 && length(thousandeyes_user.monitoring) == 0
+    error_message = "create_monitoring_role = true should create the role, and no user."
+  }
+  assert {
+    condition     = length(thousandeyes_role.monitoring_config_admin[0].permissions) == length(var.monitoring_role_permissions)
+    error_message = "The role should get every resolved permission ID."
+  }
+}
+
+run "create_monitoring_role_false_creates_no_role" {
+  command = plan
+
+  variables {
+    create_monitoring_role = false
+  }
+
+  assert {
+    condition     = length(thousandeyes_role.monitoring_config_admin) == 0 && length(data.thousandeyes_permission.monitoring) == 0
+    error_message = "create_monitoring_role = false should create no role and look up no permission."
+  }
+}
+
+run "create_monitoring_role_false_rejects_a_monitoring_user" {
+  command = plan
+
+  variables {
+    create_monitoring_role = false
+    monitoring_user        = { email = "svc-ldap-monitor@example.com" }
+  }
+
+  expect_failures = [thousandeyes_user.monitoring]
+}
+
 run "role_takes_permission_ids_from_the_data_source" {
   command = plan
 

@@ -1,7 +1,7 @@
 **How to Set Up the Monitoring Account Group, Role and User**
 
 ### Introduction
-The Terraform configuration in [`terraform/`](../terraform/README.md#monitoring-user-and-role) creates the `ThousandEyes Monitoring Config` account group and, when you set `monitoring_user`, a `Monitoring Administrator` role and a dedicated user who holds that role in the account group (`terraform/permissions.tf`). This guide describes the same setup in the ThousandEyes UI, for when you do not let Terraform manage the role and user.
+The Terraform configuration in [`terraform/`](../terraform/README.md#monitoring-user-and-role) creates the `ThousandEyes Monitoring Config` account group and, when you set `monitoring_user`, a `Monitoring Administrator` role and a dedicated user who holds that role in the account group (`terraform/permissions.tf`). `create_monitoring_role = true` creates the role without a user. This guide describes the same setup in the ThousandEyes UI, for when you do not let Terraform manage the role and user.
 
 ThousandEyes has no user groups. A user gets access by holding a role in an account group, and can hold a different role in each account group.
 

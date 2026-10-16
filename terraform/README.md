@@ -6,7 +6,7 @@ Each test's URL is an LDAP URL (RFC 4516), such as `ldaps://dc1.example.com:636/
 
 ## Prerequisites
 
-- [Terraform](https://www.terraform.io/) 1.7 or later (`terraform test` uses provider mocking).
+- [Terraform](https://www.terraform.io/) 1.7 or later. `terraform test` needs 1.11 or later (provider mocking, and `state_key` in `tests/role_upgrade.tftest.hcl`).
 - Access to a ThousandEyes account.
 - An API token from an `Organization Admin`, for every plan and apply. The configuration manages an account group (and, with `monitoring_user`, a role and a user), which needs more than `Account Admin`. See [Monitoring user and role](#monitoring-user-and-role).
 - The script's credentials, created in the ThousandEyes UI or API (`Settings ▸ Secure Credentials`): `ldapMonUser`, `ldapMonPass`, and any optional ones you use (`ldapCaBase64`, `ldapAllowCleartext`, ...). Terraform attaches them to the tests by ID only, so their values never enter Terraform state. List their IDs with `GET /v7/credentials`.
@@ -76,7 +76,15 @@ monitoring_user = {
 }
 ```
 
-Without `monitoring_user` there is no role, no user and no permission lookup, and the `monitoring_role_id` and `monitoring_user_id` outputs are null. [MONITORING_GROUP_GUIDE.md](../docs/MONITORING_GROUP_GUIDE.md) describes the same setup in the ThousandEyes UI.
+Without `monitoring_user` there is no role, no user and no permission lookup, and the `monitoring_role_id` and `monitoring_user_id` outputs are null. `create_monitoring_role` overrides this for the role:
+
+| `create_monitoring_role` | Role and permission lookups |
+|---|---|
+| `null` (default) | Only with `monitoring_user` |
+| `true` | Always, for example to keep a role created before upgrading (see [Upgrading](#upgrading)) |
+| `false` | Never; `monitoring_user` then fails the plan, because the user needs the role |
+
+The default keeps the role opt-in: a wrong permission name stops `terraform plan` (see [Role permissions](#role-permissions)), and the role needs an Organization Admin token. [MONITORING_GROUP_GUIDE.md](../docs/MONITORING_GROUP_GUIDE.md) describes the same setup in the ThousandEyes UI.
 
 ### Terraform owns the user
 
@@ -92,8 +100,6 @@ terraform import 'thousandeyes_user.monitoring[0]' <uid> # uid from GET /v7/user
 ```
 
 To keep the user when you stop managing it, run `terraform state rm 'thousandeyes_user.monitoring[0]'` before you clear `monitoring_user`.
-
-`te_user_email` is gone; remove it from `terraform.tfvars`. It was documented as the token owner's address but nothing used it (the provider needs only the token), and reusing it for this user would have turned every existing configuration into one that manages its owner's account.
 
 ### Role permissions
 
@@ -123,3 +129,15 @@ Not granted: test templates (none are used), `View sensitive data in web transac
 Use an Organization Admin token for every plan and apply, not only the first. Creating the account group needs `Edit all account groups` and refreshing it needs `View all account groups settings`; creating and editing roles needs `Edit roles`; and `GET /v7/permissions` answers only to users with a management permission. A token from the monitoring user cannot run this configuration.
 
 > **Limitation:** the provider creates the tests and alert rules in the token's current account group, not in `ThousandEyes Monitoring Config`. The role applies only in the monitoring account group, so the monitoring user does not see these tests until they live there.
+
+### Upgrading
+
+Earlier versions always declared the role, with UI labels where the API expects permission IDs, so creating it should have failed. Check before your first plan with this version:
+
+```bash
+terraform state list | grep thousandeyes_role
+```
+
+If that lists `thousandeyes_role.monitoring_config_admin` (for example because you then assigned the role by hand), set `create_monitoring_role = true`. Terraform keeps the role, moves it to `thousandeyes_role.monitoring_config_admin[0]` and replaces its permissions with the resolved IDs (the API replaces the whole list). With the default and no `monitoring_user`, Terraform deletes the role, and whoever holds it loses that access.
+
+`te_user_email` is gone; remove it from `terraform.tfvars`. It was documented as the token owner's address but nothing used it (the provider needs only the token), and reusing it for the monitoring user would have turned every existing configuration into one that manages its owner's account.
