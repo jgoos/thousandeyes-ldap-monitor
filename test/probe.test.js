@@ -381,6 +381,7 @@ describe('target and search base', () => {
     const result = await probeUrl('ldap://[::1]:389');
     assert.equal(result.verdict, 'pass', result.failure ?? '');
     assert.deepEqual(eventsOf(result, 'connect').map((e) => e.host), ['::1']);
+    assert.match(result.stdout, /Warning: sending the bind password to \[::1\]:389 without TLS/);
   });
 
   it('falls back to the ldapHost credential when the test URL is not an LDAP URL', async () => {

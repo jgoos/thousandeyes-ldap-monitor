@@ -430,6 +430,9 @@ const isTlsError = (err, host) => {
   return TLS_ERROR_KEYWORDS.some((keyword) => message.includes(keyword));
 };
 
+/** "host:port" for messages, with an IPv6 address in brackets. */
+const hostPort = (host, port) => `${host.includes(':') ? `[${host}]` : host}:${port}`;
+
 /** IPv4 or IPv6 literal. TLS SNI must not carry an IP address (RFC 6066 section 3). */
 const isIpAddress = (host) => /^\d{1,3}(\.\d{1,3}){3}$/.test(host) || host.includes(':');
 
@@ -642,15 +645,15 @@ async function runTest() {
 
   const { host, port, tls: useTls, baseDN, source } = resolveTarget(cfg);
   if (debugMode) {
-    console.log(`Debug: Target ${useTls ? 'ldaps' : 'ldap'}://${host}:${port} from the ${source}; search base ${baseDN ? `"${baseDN}"` : 'Root DSE'}`);
+    console.log(`Debug: Target ${useTls ? 'ldaps' : 'ldap'}://${hostPort(host, port)} from the ${source}; search base ${baseDN ? `"${baseDN}"` : 'Root DSE'}`);
   }
 
   // A simple bind sends the password as is; without TLS anyone on the path can read it.
   if (!useTls) {
     if (!allowCleartext) {
-      throw configError(`refusing to send the bind password to ${host}:${port} without TLS (RFC 4513 section 5.1.3). Use ldaps://, or set the ldapAllowCleartext credential to true to accept the risk`);
+      throw configError(`refusing to send the bind password to ${hostPort(host, port)} without TLS (RFC 4513 section 5.1.3). Use ldaps://, or set the ldapAllowCleartext credential to true to accept the risk`);
     }
-    console.log(`Warning: sending the bind password to ${host}:${port} without TLS (ldapAllowCleartext is set)`);
+    console.log(`Warning: sending the bind password to ${hostPort(host, port)} without TLS (ldapAllowCleartext is set)`);
   }
 
   if (slowMs <= 0) {
@@ -798,7 +801,7 @@ async function runTest() {
     metrics.connectionStart = Date.now();
     try {
       const connecting = useTls ? net.connectTls(port, host, tlsOptions) : net.connect(port, host);
-      sock = await withTimeout(connecting, remainingMs(), `connect to ${host}:${port}`, closeQuietly);
+      sock = await withTimeout(connecting, remainingMs(), `connect to ${hostPort(host, port)}`, closeQuietly);
       metrics.connectionEnd = Date.now();
       stopMarker(`ldap-attempt-${attempt}`);
       break;
@@ -810,7 +813,7 @@ async function runTest() {
       if (tlsFailure) {
         stopMarker(connectMarkerName);
         const hint = caBase64 ? '' : '. If the server certificate comes from a private CA, provide it in the ldapCaBase64 credential';
-        throw new Error(`TLS handshake with ${host}:${port} failed: ${describeError(err)}${hint}`, { cause: err });
+        throw new Error(`TLS handshake with ${hostPort(host, port)} failed: ${describeError(err)}${hint}`, { cause: err });
       }
       if (attempt > maxRetries || remainingMs() <= retryDelayMs) {
         stopMarker(connectMarkerName);
