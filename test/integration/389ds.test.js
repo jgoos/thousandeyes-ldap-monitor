@@ -63,6 +63,23 @@ describe('389 Directory Server', { skip: configured ? false : 'run via npm run t
     assert.match(result.failure, /^SEARCH rc=32 noSuchObject: .*matchedDN: "dc=example,dc=com"/);
   });
 
+  it('reads the Root DSE and reports the vendorVersion', async () => {
+    const result = await run({});
+    assert.equal(result.verdict, 'pass', result.failure ?? result.stdout);
+    assert.match(result.stdout, /LDAP Monitor: PASS - .*; vendorVersion: 389-Directory\//);
+  });
+
+  it('passes when the suffix is the expected naming context', async () => {
+    const result = await run({ ldapExpectedNamingContext: 'DC=Example, DC=Com' });
+    assert.equal(result.verdict, 'pass', result.failure ?? result.stdout);
+  });
+
+  it('fails when the expected naming context is not served', async () => {
+    const result = await run({ ldapExpectedNamingContext: 'dc=missing,dc=com' });
+    assert.equal(result.verdict, 'fail');
+    assert.match(result.failure, /^ROOTDSE: namingContexts does not include "dc=missing,dc=com"; the server lists .*"dc=example,dc=com"/);
+  });
+
   it('refuses a cleartext bind unless ldapAllowCleartext is set', async () => {
     const result = await run({ ldapAllowCleartext: '' });
     assert.equal(result.verdict, 'fail');

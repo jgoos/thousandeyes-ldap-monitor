@@ -3,6 +3,8 @@
  *
  * • Authenticated LDAPv3 simple bind
  * • Base-scope search of the Root DSE, or of a configured base DN
+ * • Root DSE checks: LDAPv3 in supportedLDAPVersion, Active Directory isSynchronized and clock skew
+ *   (currentTime), and optionally an expected naming context
  * • Fails (throws) on any error. Latency is not judged here: each step is a ThousandEyes marker
  *   (ldap-tcp-connect or ldaps-ssl-handshake, ldap-bind, ldap-search), and alert rules on marker
  *   duration flag slow steps (terraform/marker_alerts.tf)
@@ -18,12 +20,18 @@
  *   ldapMonPass  →  password
  *
  * Optional Credentials:
- *   ldapCaBase64       →  CA certificate(s) for LDAPS, as PEM text or base64-encoded PEM
- *   ldapHost, ldapPort →  server and port (389 or 636) when the test URL is not an LDAP URL
- *   ldapBaseDN         →  search base when the test URL has no "/" path (default: Root DSE)
- *   ldapAllowCleartext →  'true' to allow sending the password without TLS (RFC 4513 5.1.3)
- *   ldapBindOnly       →  'true' to skip the search
- *   ldapDebugMode      →  'true' for verbose debugging (default: false)
+ *   ldapCaBase64              →  CA certificate(s) for LDAPS, as PEM text or base64-encoded PEM
+ *   ldapHost, ldapPort        →  server and port (389 or 636) when the test URL is not an LDAP URL
+ *   ldapBaseDN                →  search base when the test URL has no "/" path (default: Root DSE)
+ *   ldapAllowCleartext        →  'true' to allow sending the password without TLS (RFC 4513 5.1.3)
+ *   ldapBindOnly              →  'true' to skip the search
+ *   ldapExpectedNamingContext →  a DN the Root DSE must list in namingContexts (Root DSE search only)
+ *   ldapMaxClockSkewSeconds   →  most the Root DSE currentTime may differ from the agent clock
+ *                                (default: 300; 0 turns the check off)
+ *   ldapRequireEntry          →  'true' to fail a search that returns no entry. Off by default: some
+ *                                servers answer a base DN the account cannot read with success and
+ *                                no entry, rather than noSuchObject
+ *   ldapDebugMode             →  'true' for verbose debugging (default: false)
  *
  * A failure is one line that starts with its class:
  *   CONFIG: …                       missing or invalid configuration; nothing was sent
@@ -31,6 +39,7 @@
  *   TLS: …                          the TLS handshake or certificate verification failed
  *   TIMEOUT: …                      a connect or a response took longer than the time limit allows
  *   BIND: …, SEARCH: …              a protocol error during that operation
+ *   ROOTDSE: …                      the Root DSE reports a problem (see Root DSE checks)
  *   BIND rc=49 invalidCredentials: …, SEARCH rc=32 noSuchObject: …
  *                                   the server returned that LDAP result code
  */
@@ -49,6 +58,8 @@ const MIN_TIME_MARGIN_MS = 1000; // left before the time limit for reporting
 const CLEANUP_TIMEOUT_MS = 1000; // most that Unbind and socket close may take together
 const MAX_EMPTY_READS = 3; // consecutive empty reads treated as end of stream
 const MAX_DIAGNOSTIC_LENGTH = 200; // characters of server diagnosticMessage kept in errors
+const MAX_QUOTED_VALUES = 5; // server attribute values quoted in one message
+const DEFAULT_MAX_CLOCK_SKEW_S = 300; // Kerberos' default tolerance for clock skew
 
 /* ───────────── LDAP protocol codec (RFC 4511; BER per section 5.1) ───────────── */
 
@@ -58,6 +69,7 @@ const LDAP_TAG = {
   octetString: 0x04,
   enumerated: 0x0a,
   sequence: 0x30,
+  set: 0x31,
   bindRequest: 0x60,          // [APPLICATION 0]
   bindResponse: 0x61,         // [APPLICATION 1]
   unbindRequest: 0x42,        // [APPLICATION 2], primitive NULL
@@ -76,6 +88,8 @@ const MESSAGE_ID = { bind: 1, search: 2, unbind: 3 };
 const SEARCH_SCOPE_BASE = 0;
 const NEVER_DEREF_ALIASES = 0;
 const NO_ATTRIBUTES = '1.1'; // RFC 4511 4.5.1.8: return no attributes
+// Root DSE attributes the checks read (RFC 4512 5.1; isSynchronized and currentTime are Active Directory's).
+const ROOT_DSE_ATTRIBUTES = ['namingContexts', 'supportedLDAPVersion', 'vendorVersion', 'isSynchronized', 'currentTime'];
 const NOTICE_OF_DISCONNECTION_OID = '1.3.6.1.4.1.1466.20036';
 
 /** RFC 4511 4.1.9 result codes. */
@@ -312,6 +326,28 @@ function decodeLdapResult({ pdu, op }) {
 }
 
 /**
+ * Attributes of a SearchResultEntry (RFC 4511 4.5.2), keyed by attribute type in lower case,
+ * since attribute types are case-insensitive.
+ * @returns {Map<string, string[]>}
+ */
+function decodeEntryAttributes({ pdu, op }) {
+  const [objectName, attributes] = readBerChildren(pdu, op);
+  if (!attributes || objectName.tag !== LDAP_TAG.octetString || attributes.tag !== LDAP_TAG.sequence) {
+    throw new Error('malformed SearchResultEntry');
+  }
+  const entry = new Map();
+  for (const attribute of readBerChildren(pdu, attributes)) {
+    const [type, vals] = readBerChildren(pdu, attribute);
+    if (!vals || type.tag !== LDAP_TAG.octetString || vals.tag !== LDAP_TAG.set) {
+      throw new Error('malformed attribute in SearchResultEntry');
+    }
+    const values = readBerChildren(pdu, vals).map((value) => berValue(pdu, value).toString('utf8'));
+    entry.set(berValue(pdu, type).toString('utf8').toLowerCase(), values);
+  }
+  return entry;
+}
+
+/**
  * Reads whole LDAPMessages from a socket, whatever the TCP segmentation: buffers partial reads
  * and splits reads that hold several messages (RFC 4511 5.2: messages are framed only by their
  * BER length).
@@ -499,10 +535,103 @@ const stopMarker = (name) => {
   }
 };
 
+/* ───────────── Root DSE checks ───────────── */
+
+/**
+ * Milliseconds since the epoch for a GeneralizedTime (RFC 4517 3.3.13), such as Active
+ * Directory's "20261016201530.0Z".
+ * @param {string} text
+ * @returns {number} NaN when `text` is not a GeneralizedTime
+ */
+function parseGeneralizedTime(text) {
+  const match = /^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})?(\d{2})?(?:[.,](\d+))?(Z|[+-]\d{4})$/.exec(String(text).trim());
+  if (!match) return NaN;
+  const [year, month, day, hour, minute, second] = match.slice(1, 7).map((part) => (part === undefined ? undefined : Number(part)));
+  const [fraction, zone] = match.slice(7);
+  if (month < 1 || month > 12 || day < 1 || day > 31 || hour > 23 || minute > 59 || second > 60) return NaN;
+  let ms = Date.UTC(year, month - 1, day, hour, minute ?? 0, second ?? 0);
+  // A fraction is of the last unit given: second, minute or hour.
+  if (fraction) ms += Number(`0.${fraction}`) * (second !== undefined ? 1000 : minute !== undefined ? 60000 : 3600000);
+  if (zone !== 'Z') ms -= (zone[0] === '-' ? -1 : 1) * (Number(zone.slice(1, 3)) * 60 + Number(zone.slice(3))) * 60000;
+  return ms;
+}
+
+/** A DN for comparison, ignoring letter case and spaces around separators. */
+const normalizeDn = (dn) => String(dn).trim().toLowerCase().replace(/\s*([,=+])\s*/g, '$1');
+
+/** Server attribute values for a message: quoted, made safe, and at most MAX_QUOTED_VALUES. */
+const quoteValues = (values) => values.slice(0, MAX_QUOTED_VALUES).map((v) => `"${sanitizeServerText(v)}"`).join(', ') +
+  (values.length > MAX_QUOTED_VALUES ? `, and ${values.length - MAX_QUOTED_VALUES} more` : '');
+
+/**
+ * Check what the Root DSE (RFC 4512 5.1) says about the server. Attributes a server does not
+ * publish are not checked, except namingContexts when an expected naming context is set.
+ * @param {Map<string, string[]> | null} entry - the Root DSE attributes; null when no entry came back
+ * @param {{ expectedNamingContext: string, maxClockSkewS: number, agentTimeMs: number }} options
+ *   agentTimeMs is the agent clock when the server answered; maxClockSkewS 0 skips the skew check
+ * @returns {string[]} facts for the PASS summary, such as the vendorVersion and clock skew
+ * @throws {Error} a ROOTDSE failure that lists every problem found
+ */
+function checkRootDse(entry, { expectedNamingContext, maxClockSkewS, agentTimeMs }) {
+  const values = (name) => (entry && entry.get(name.toLowerCase())) || [];
+  const problems = [];
+  const facts = [];
+
+  const [vendorVersion] = values('vendorVersion');
+  if (vendorVersion) facts.push(`vendorVersion: ${sanitizeServerText(vendorVersion)}`);
+
+  // Active Directory publishes FALSE until the domain controller is fully synchronized.
+  if (values('isSynchronized').some((v) => v.trim().toUpperCase() === 'FALSE')) {
+    problems.push('isSynchronized is FALSE: the server reports that it is not fully synchronized');
+  }
+
+  const versions = values('supportedLDAPVersion');
+  if (versions.length > 0 && !versions.some((v) => v.trim() === '3')) {
+    problems.push(`supportedLDAPVersion lists ${quoteValues(versions)} but not 3`);
+  }
+
+  if (expectedNamingContext) {
+    const contexts = values('namingContexts');
+    if (!entry) {
+      problems.push(`the server returned no Root DSE entry; expected namingContexts to include "${expectedNamingContext}"`);
+    } else if (contexts.length === 0) {
+      problems.push(`the Root DSE lists no namingContexts; expected "${expectedNamingContext}"`);
+    } else if (!contexts.some((dn) => normalizeDn(dn) === normalizeDn(expectedNamingContext))) {
+      problems.push(`namingContexts does not include "${expectedNamingContext}"; the server lists ${quoteValues(contexts)}`);
+    }
+  }
+
+  // The agent clock is the reference. Kerberos fails beyond its tolerance, 5 minutes by default.
+  const [currentTime] = values('currentTime');
+  const serverTimeMs = currentTime ? parseGeneralizedTime(currentTime) : NaN;
+  if (Number.isFinite(serverTimeMs)) {
+    const skewS = Math.round((serverTimeMs - agentTimeMs) / 1000);
+    facts.push(`clock skew: ${skewS < 0 ? '-' : '+'}${Math.abs(skewS)} s`);
+    if (maxClockSkewS > 0 && Math.abs(skewS) > maxClockSkewS) {
+      problems.push(`server clock is ${Math.abs(skewS)} s ${skewS > 0 ? 'ahead of' : 'behind'} the agent clock ` +
+        `(currentTime ${sanitizeServerText(currentTime)}); the limit is ${maxClockSkewS} s (ldapMaxClockSkewSeconds)`);
+    }
+  }
+
+  if (problems.length > 0) throw failure('ROOTDSE', problems.join('; '));
+  return facts;
+}
+
 /* ───────────── Target configuration ───────────── */
 
 /** Credential flag: 'true', '1' or 'yes', in any letter case. */
 const isEnabled = (value) => ['true', '1', 'yes'].includes(String(value || '').trim().toLowerCase());
+
+/**
+ * A whole-number credential, or `fallback` when it is not set.
+ * @throws {Error} a configuration error for anything but digits
+ */
+const wholeNumberSetting = (name, value, fallback) => {
+  const text = String(value ?? '').trim();
+  if (text === '') return fallback;
+  if (!/^\d+$/.test(text)) throw configError(`${name} must be a whole number, not "${sanitizeServerText(text)}"`);
+  return Number(text);
+};
 
 /**
  * Parse an RFC 4516 LDAP URL: ldap[s]://host[:port][/dn[?attributes?scope?filter?extensions]].
@@ -633,7 +762,10 @@ const getTestConfig = () => {
     retryDelayMs: 100,
     maxRetries: 2,
     tlsMinVersion: 'TLSv1.2',
-    bindOnlyMode: isEnabled(getCredential('ldapBindOnly'))
+    bindOnlyMode: isEnabled(getCredential('ldapBindOnly')),
+    expectedNamingContext: String(getCredential('ldapExpectedNamingContext') ?? '').trim(),
+    maxClockSkewS: wholeNumberSetting('ldapMaxClockSkewSeconds', getCredential('ldapMaxClockSkewSeconds'), DEFAULT_MAX_CLOCK_SKEW_S),
+    requireEntry: isEnabled(getCredential('ldapRequireEntry'))
   };
 };
 
@@ -651,7 +783,10 @@ async function runTest() {
     maxRetries,
     tlsMinVersion,
     bindOnlyMode,
-    allowCleartext
+    allowCleartext,
+    expectedNamingContext,
+    maxClockSkewS,
+    requireEntry
   } = cfg;
   
   // Helper function for secure credential access  
@@ -683,6 +818,9 @@ async function runTest() {
   const { host, port, tls: useTls, baseDN, source } = resolveTarget(cfg);
   if (debugMode) {
     console.log(`Debug: Target ${useTls ? 'ldaps' : 'ldap'}://${hostPort(host, port)} from the ${source}; search base ${baseDN ? `"${baseDN}"` : 'Root DSE'}`);
+  }
+  if (expectedNamingContext && (bindOnlyMode || baseDN)) {
+    throw configError(`ldapExpectedNamingContext needs the Root DSE search, so it cannot be used with ${bindOnlyMode ? 'ldapBindOnly' : `the search base "${baseDN}"`}`);
   }
 
   // A simple bind sends the password as is; without TLS anyone on the path can read it.
@@ -925,24 +1063,27 @@ async function runTest() {
     }
 
     /* 3 ▸ Base-scope search of the search base, the Root DSE by default (messageID 2) */
-    // Request no attributes: the check needs only the result code.
+    // From the Root DSE, request only the attributes the checks read. From a base DN, request no
+    // attributes: the check needs only the result code, and the entry may be the account's own.
+    const attributes = baseDN ? [NO_ATTRIBUTES] : ROOT_DSE_ATTRIBUTES;
     const searchReq = ldapMessage(MESSAGE_ID.search, searchRequest({
       baseObject: baseDN,
       scope: SEARCH_SCOPE_BASE,
       sizeLimit: 1,
       timeLimit: 5, // seconds
       presentAttribute: 'objectClass',
-      attributes: [NO_ATTRIBUTES]
+      attributes
     }));
 
     if (debugMode) {
-      console.log(`Debug: Search - base scope on ${baseDN ? `"${baseDN}"` : 'the Root DSE'}, filter '(objectClass=*)', attributes '1.1'`);
+      console.log(`Debug: Search - base scope on ${baseDN ? `"${baseDN}"` : 'the Root DSE'}, filter '(objectClass=*)', attributes '${attributes.join(' ')}'`);
     }
 
     metrics.searchStart = Date.now();
     markers.start('ldap-search');
     let searchResult;
     let entries = 0;
+    let rootDse = null;
     try {
       // Entries, references and intermediate responses may precede SearchResultDone (RFC 4511 4.5.2).
       searchResult = await inPhase('SEARCH', async () => {
@@ -952,6 +1093,7 @@ async function runTest() {
           switch (response.opTag) {
             case LDAP_TAG.searchResultEntry:
               entries++;
+              if (!baseDN && !rootDse) rootDse = decodeEntryAttributes(response);
               break;
             case LDAP_TAG.searchResultReference:
             case LDAP_TAG.intermediateResponse:
@@ -977,10 +1119,26 @@ async function runTest() {
       throw new Error(`SEARCH ${formatLdapResult(searchResult)}`);
     }
 
+    if (requireEntry && entries === 0) {
+      throw failure('SEARCH', `no entry returned for ${baseDN ? `"${baseDN}"` : 'the Root DSE'}; the base DN may not exist, or the account may not be allowed to read it (ldapRequireEntry is set)`);
+    }
+
+    let facts = [];
+    if (!baseDN) {
+      if (debugMode) {
+        for (const [type, values] of rootDse || []) console.log(`Debug: Root DSE ${type}: ${quoteValues(values)}`);
+      }
+      facts = checkRootDse(rootDse, {
+        expectedNamingContext,
+        maxClockSkewS,
+        agentTimeMs: (metrics.searchStart + metrics.searchEnd) / 2
+      });
+    }
+
     // Final performance summary (visible in GUI)
     const totalTime = metrics.searchEnd - metrics.connectionStart;
     const connectionTime = metrics.connectionEnd - metrics.connectionStart;
-    console.log(`LDAP Monitor: PASS - Total ${totalTime}ms (connect: ${connectionTime}ms, bind: ${bindRTT}ms, search: ${searchRTT}ms)`);
+    console.log(`LDAP Monitor: PASS - Total ${totalTime}ms (connect: ${connectionTime}ms, bind: ${bindRTT}ms, search: ${searchRTT}ms)${facts.map((fact) => `; ${fact}`).join('')}`);
 
   } finally {
     /* End the LDAP session (RFC 4511 4.3), then close the socket. Both share one short window:

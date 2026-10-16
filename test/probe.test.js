@@ -228,8 +228,8 @@ describe('search', () => {
     assert.equal(searchReq.derefAliases.tag, TAG.enumerated);
   });
 
-  it('requests no attributes ("1.1") so no entry data is returned (B16/S3)', async () => {
-    const result = await probe({ bind: bindOk, search: () => [ldap.searchDone(2, 0)] });
+  it('requests no attributes ("1.1") from a configured base DN, so no entry data is returned (B16/S3)', async () => {
+    const result = await probe({ bind: bindOk, search: () => [ldap.searchDone(2, 0)] }, { credentials: { ldapBaseDN: DN } });
     const [searchReq] = requestsOf(result, TAG.searchRequest);
     assert.deepEqual(searchReq.attributes, ['1.1']);
   });
@@ -246,6 +246,117 @@ describe('search', () => {
   it('sends an UnbindRequest before closing (RFC 4511 4.3) (B26)', async () => {
     const result = await probe({ bind: bindOk }, { credentials: { ldapBindOnly: 'true' } });
     assert.equal(requestsOf(result, TAG.unbindRequest).length, 1);
+  });
+});
+
+describe('Root DSE checks', () => {
+  // GeneralizedTime as Active Directory writes it, e.g. "20261016201530.0Z".
+  const generalizedTime = (ms) => new Date(ms).toISOString().replace(/[-:T]/g, '').replace(/\.\d+Z$/, '.0Z');
+  const rootDse = (attributes) => ({ bind: bindOk, search: () => [ldap.searchEntry(2, '', attributes), ldap.searchDone(2, 0)] });
+  const ds389 = { namingContexts: ['dc=example,dc=com', 'o=netscaperoot'], supportedLDAPVersion: ['2', '3'], vendorVersion: ['389-Directory/3.1.1 B2025.001.0000'] };
+  const activeDirectory = (skewMs = 0) => ({
+    namingContexts: ['DC=corp,DC=example,DC=com', 'CN=Configuration,DC=corp,DC=example,DC=com'],
+    supportedLDAPVersion: ['3', '2'],
+    isSynchronized: ['TRUE'],
+    currentTime: [generalizedTime(Date.now() + skewMs)],
+  });
+
+  it('requests the Root DSE attributes it checks', async () => {
+    const result = await probe(rootDse(ds389));
+    const [searchReq] = requestsOf(result, TAG.searchRequest);
+    assert.deepEqual(searchReq.attributes, ['namingContexts', 'supportedLDAPVersion', 'vendorVersion', 'isSynchronized', 'currentTime']);
+  });
+
+  it('reports the server vendorVersion in the PASS summary', async () => {
+    const result = await probe(rootDse(ds389));
+    assert.equal(result.verdict, 'pass', result.failure ?? '');
+    assert.match(result.stdout, /LDAP Monitor: PASS - .*; vendorVersion: 389-Directory\/3\.1\.1 B2025\.001\.0000/);
+  });
+
+  it('passes when ldapExpectedNamingContext is served, ignoring case and spaces', async () => {
+    const result = await probe(rootDse(activeDirectory()), { credentials: { ldapExpectedNamingContext: 'dc=corp, dc=example, dc=com' } });
+    assert.equal(result.verdict, 'pass', result.failure ?? '');
+  });
+
+  it('fails when the expected naming context is not among namingContexts', async () => {
+    const result = await probe(rootDse(ds389), { credentials: { ldapExpectedNamingContext: 'dc=missing,dc=com' } });
+    assert.equal(result.verdict, 'fail');
+    assert.equal(result.failure, 'ROOTDSE: namingContexts does not include "dc=missing,dc=com"; the server lists "dc=example,dc=com", "o=netscaperoot"');
+  });
+
+  it('fails when a naming context is expected but the Root DSE lists none', async () => {
+    const result = await probe(rootDse({ supportedLDAPVersion: ['3'] }), { credentials: { ldapExpectedNamingContext: 'dc=example,dc=com' } });
+    assert.match(result.failure, /^ROOTDSE: the Root DSE lists no namingContexts; expected "dc=example,dc=com"/);
+  });
+
+  it('fails when a naming context is expected but no Root DSE entry is returned', async () => {
+    const result = await probe({ bind: bindOk, search: () => [ldap.searchDone(2, 0)] }, { credentials: { ldapExpectedNamingContext: 'dc=example,dc=com' } });
+    assert.match(result.failure, /^ROOTDSE: the server returned no Root DSE entry; expected namingContexts to include "dc=example,dc=com"/);
+  });
+
+  for (const [what, credentials] of [['a base DN', { ldapBaseDN: 'dc=example,dc=com' }], ['bind-only mode', { ldapBindOnly: 'true' }]]) {
+    it(`rejects ldapExpectedNamingContext with ${what}, before connecting`, async () => {
+      const result = await probe(rootDse(ds389), { credentials: { ldapExpectedNamingContext: 'dc=example,dc=com', ...credentials } });
+      assert.match(result.failure, /^CONFIG: ldapExpectedNamingContext needs the Root DSE search/);
+      assert.equal(eventsOf(result, 'connect').length, 0);
+    });
+  }
+
+  it('fails when the server does not list LDAPv3 in supportedLDAPVersion', async () => {
+    const result = await probe(rootDse({ supportedLDAPVersion: ['2'] }));
+    assert.match(result.failure, /^ROOTDSE: supportedLDAPVersion lists "2" but not 3/);
+  });
+
+  it('passes an Active Directory DC that is synchronized and in time, reporting the clock skew', async () => {
+    const result = await probe(rootDse(activeDirectory(2_000)));
+    assert.equal(result.verdict, 'pass', result.failure ?? '');
+    assert.match(result.stdout, /LDAP Monitor: PASS - .*; clock skew: \+[123] s/);
+  });
+
+  it('fails when an Active Directory DC reports isSynchronized FALSE', async () => {
+    const result = await probe(rootDse({ ...activeDirectory(), isSynchronized: ['FALSE'] }));
+    assert.match(result.failure, /^ROOTDSE: isSynchronized is FALSE: the server reports that it is not fully synchronized/);
+  });
+
+  it('fails when the server clock is more than 300 s off the agent clock', async () => {
+    const result = await probe(rootDse(activeDirectory(-600_000)));
+    assert.match(result.failure, /^ROOTDSE: server clock is (599|600|601) s behind the agent clock \(currentTime \d{14}\.0Z\); the limit is 300 s \(ldapMaxClockSkewSeconds\)$/);
+  });
+
+  it('allows a larger skew with ldapMaxClockSkewSeconds, and none is checked with 0', async () => {
+    for (const limit of ['900', '0']) {
+      const result = await probe(rootDse(activeDirectory(-600_000)), { credentials: { ldapMaxClockSkewSeconds: limit } });
+      assert.equal(result.verdict, 'pass', result.failure ?? '');
+    }
+  });
+
+  it('reports every Root DSE problem in one line', async () => {
+    const result = await probe(rootDse({ ...activeDirectory(900_000), isSynchronized: ['FALSE'] }));
+    assert.match(result.failure, /^ROOTDSE: isSynchronized is FALSE: .*; server clock is \d+ s ahead of the agent clock/);
+  });
+
+  it('ignores a currentTime it cannot parse', async () => {
+    const result = await probe(rootDse({ ...activeDirectory(), currentTime: ['10/16/2026 8:15:30 PM'] }));
+    assert.equal(result.verdict, 'pass', result.failure ?? '');
+    assert.doesNotMatch(result.stdout, /clock skew/);
+  });
+
+  it('rejects an ldapMaxClockSkewSeconds that is not a whole number', async () => {
+    const result = await probe(rootDse(ds389), { credentials: { ldapMaxClockSkewSeconds: '5m' } });
+    assert.match(result.failure, /^CONFIG: ldapMaxClockSkewSeconds must be a whole number/);
+  });
+
+  it('passes a search that returns no entry unless ldapRequireEntry is set', async () => {
+    const scenario = { bind: bindOk, search: () => [ldap.searchDone(2, 0)] };
+    const base = { ldapBaseDN: 'ou=missing,dc=example,dc=com' };
+    assert.equal((await probe(scenario, { credentials: base })).verdict, 'pass');
+    const result = await probe(scenario, { credentials: { ...base, ldapRequireEntry: 'true' } });
+    assert.match(result.failure, /^SEARCH: no entry returned for "ou=missing,dc=example,dc=com"; the base DN may not exist, or the account may not be allowed to read it/);
+  });
+
+  it('does not decode or check entries from a configured base DN', async () => {
+    const result = await probe(rootDse({ supportedLDAPVersion: ['2'] }), { credentials: { ldapBaseDN: 'dc=example,dc=com' } });
+    assert.equal(result.verdict, 'pass', result.failure ?? '');
   });
 });
 
