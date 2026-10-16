@@ -1,11 +1,6 @@
 # Role and monitoring user (permissions.tf), against a mocked provider. Runs that check values
 # the API computes (IDs) use command = apply, which the mock provider fills in without an account.
 mock_provider "thousandeyes" {
-  mock_resource "thousandeyes_account_group" {
-    defaults = {
-      aid = "7001"
-    }
-  }
   mock_resource "thousandeyes_role" {
     defaults = {
       role_id = "8001"
@@ -13,11 +8,20 @@ mock_provider "thousandeyes" {
   }
 }
 
+# The real provider, pointed at a local port that refuses connections: a run that uses it fails
+# at the first API call.
+provider "thousandeyes" {
+  alias        = "unreachable"
+  token        = "unused"
+  api_endpoint = "http://127.0.0.1:1/v7"
+  timeout      = 5
+}
+
 variables {
   te_api_token   = "mock-token"
   agent_ids      = ["1001"]
   credential_ids = ["2001", "2002"]
-  # The account group the tests live in; the module-created group gets aid 7001 from the mock.
+  # The account group the tests live in.
   account_group_id = "6001"
 }
 
@@ -31,6 +35,16 @@ run "no_monitoring_user_creates_no_role_or_user" {
   assert {
     condition     = length(data.thousandeyes_permission.monitoring) == 0
     error_message = "Without monitoring_user no permission should be looked up (GET /v7/permissions needs a management permission)."
+  }
+}
+
+# Planning the defaults reads no data source, so a token without management permissions can plan
+# them. The run fails if any lookup, such as the role's permission IDs, joins the default path.
+run "defaults_plan_without_api_calls" {
+  command = plan
+
+  providers = {
+    thousandeyes = thousandeyes.unreachable
   }
 }
 
@@ -168,7 +182,7 @@ run "monitoring_user_holds_the_role_in_the_tests_account_group" {
       account_group_id = "6001"
       role_ids         = toset(["8001"])
     }]
-    error_message = "The user's only assignment should be the role in account_group_id, not in the module-created group."
+    error_message = "The user's only assignment should be the role in account_group_id, where the tests live."
   }
   assert {
     condition     = output.monitoring_role_id == "8001" && output.monitoring_user_id == thousandeyes_user.monitoring[0].uid

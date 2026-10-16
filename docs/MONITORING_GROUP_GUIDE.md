@@ -35,4 +35,6 @@ Use a dedicated account, not your own or a person's.
 5. Click **Add New Users**. ThousandEyes emails the address a registration link.
 
 ### Next Steps
-The monitoring user can now manage the LDAP tests and alert rules in that account group. Terraform itself still needs an Organization Admin token, because it creates a `ThousandEyes Monitoring Config` account group. Nothing uses that group, and making it optional is a follow-up.
+The monitoring user can now manage the LDAP tests and alert rules in that account group. Its API token can also run the Terraform configuration in that group, as long as `monitoring_user` and `create_monitoring_role` are unset there (see [Token](../terraform/README.md#token)). Only creating or changing the role and the user needs an Organization Admin.
+
+Set up the role once per organization, here or with Terraform in one workspace, even when you apply the configuration in several workspaces (for example one per region). Earlier versions of the configuration also created a `ThousandEyes Monitoring Config` account group in every workspace. Nothing used it; the current version leaves it in place but no longer manages it, so you can delete it by hand ([Upgrading](../terraform/README.md#upgrading)).

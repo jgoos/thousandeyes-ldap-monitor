@@ -6,9 +6,9 @@ Each test's URL is an LDAP URL (RFC 4516), such as `ldaps://dc1.example.com:636/
 
 ## Prerequisites
 
-- [Terraform](https://www.terraform.io/) 1.7 or later. `terraform test` needs 1.11 or later (provider mocking, and `state_key` in `tests/role_upgrade.tftest.hcl`).
+- [Terraform](https://www.terraform.io/) 1.7 or later. `terraform test` needs 1.11 or later (provider mocking, and `state_key` in the upgrade tests).
 - Access to a ThousandEyes account.
-- An API token from an `Organization Admin`, for every plan and apply. The configuration manages an account group (and, with `monitoring_user`, a role and a user), which needs more than `Account Admin`. See [Monitoring user and role](#monitoring-user-and-role).
+- An API token whose user holds, in the account group the tests live in, the seven test, alert rule and agent permissions listed under [Token](#token). The defaults need no `Organization Admin`. `monitoring_user` or `create_monitoring_role = true` does, for every plan and apply (see [Monitoring user and role](#monitoring-user-and-role)).
 - The script's credentials, created in the ThousandEyes UI or API (`Settings ▸ Secure Credentials`): `ldapMonUser`, `ldapMonPass`, and any optional ones you use (`ldapCaBase64`, `ldapAllowCleartext`, ...). Terraform attaches them to the tests by ID only, so their values never enter Terraform state. List their IDs with `GET /v7/credentials`.
 
 ## Configuration
@@ -85,7 +85,9 @@ Without `monitoring_user` there is no role, no user and no permission lookup, an
 | `true` | Always, for example to keep a role created before upgrading (see [Upgrading](#upgrading)) |
 | `false` | Never; `monitoring_user` then fails the plan, because the user needs the role |
 
-The default keeps the role opt-in: a wrong permission name stops `terraform plan` (see [Role permissions](#role-permissions)), and the role needs an Organization Admin token. [MONITORING_GROUP_GUIDE.md](../docs/MONITORING_GROUP_GUIDE.md) describes the same setup in the ThousandEyes UI.
+The default keeps the role opt-in: a wrong permission name stops `terraform plan` (see [Role permissions](#role-permissions)), and the role needs an Organization Admin token. Without the role and user, a token with only the monitoring permissions can run the configuration (see [Token](#token)). [MONITORING_GROUP_GUIDE.md](../docs/MONITORING_GROUP_GUIDE.md) describes the same setup in the ThousandEyes UI.
+
+**Enable it in one workspace only.** Roles and users belong to the organization, not to a workspace or an account group. If you apply this configuration more than once, for example once per region, set `monitoring_user` or `create_monitoring_role` in one workspace and leave both unset in the others. Otherwise each workspace creates its own `Monitoring Administrator` role (a duplicate or a name conflict), and two workspaces cannot own the same user. The other workspaces then need no Organization Admin token. The managed user holds the role only in its own workspace's `account_group_id`. For workspaces in other account groups, assign the role to a different user in the UI (Part 2 of the guide). An assignment you add to the managed user does not last, because its next apply replaces the user's assignments.
 
 ### Account group
 
@@ -93,7 +95,7 @@ The default keeps the role opt-in: a wrong permission name stops `terraform plan
 
 Set it to the group where the tests already live. The provider reads each test in the configured group. In another group the read returns 404, the provider takes the test as deleted, and the plan creates it again in the new group. The old tests keep running in the old group until you delete them by hand.
 
-The configuration still creates a `ThousandEyes Monitoring Config` account group, which nothing uses any more. It needs an Organization Admin token (see [Token](#token)). Making it optional, so that a token with only the monitoring role could run this configuration, is a follow-up.
+The configuration creates no account group. A group created in the same apply could not hold the tests: no test or alert rule resource takes an account group of its own, and the provider's `account_group_id` must be known when Terraform plans. Create the group first (UI or API), then set `account_group_id` to it.
 
 ### Terraform owns the user
 
@@ -143,7 +145,16 @@ terraform import 'thousandeyes_role.monitoring_config_admin[0]' <roleId> # roleI
 
 ### Token
 
-Use an Organization Admin token for every plan and apply, not only the first. Creating the account group needs `Edit all account groups` and refreshing it needs `View all account groups settings`; creating and editing roles needs `Edit roles`; and `GET /v7/permissions` answers only to users with a management permission. A token from the monitoring user cannot run this configuration while it creates the account group.
+The token a plan or apply needs depends on whether the configuration manages the role:
+
+| Configuration | Token |
+|---|---|
+| Defaults: `monitoring_user` and `create_monitoring_role` unset | A user who holds the seven permissions in [Role permissions](#role-permissions) in the tests' account group, and nothing more. The monitoring user's own token qualifies |
+| `monitoring_user`, or `create_monitoring_role = true` | An Organization Admin, for every plan and apply, not only the first |
+
+With the defaults, Terraform manages only the tests and the alert rules, in the provider's account group (`account_group_id`, else `TE_AID`, else the token owner's default group). It makes no role, user, permission or account group call (`tests/permissions.tftest.hcl` and `tests/account_group_upgrade.tftest.hcl` check this). Give the token's user the role in that account group only.
+
+The role and user need more. Creating and editing roles needs `Edit roles`, which `Account Admin` lacks, and `GET /v7/permissions`, which the role's permission lookups call, answers only to users with a management permission.
 
 ### Upgrading
 
@@ -156,3 +167,4 @@ Use an Organization Admin token for every plan and apply, not only the first. Cr
   If that lists `thousandeyes_role.monitoring_config_admin`, for example because you then assigned the role by hand, set `create_monitoring_role = true`. Terraform keeps the role and moves it to `thousandeyes_role.monitoring_config_admin[0]` by itself. It also replaces the role's permissions with the resolved IDs. With the defaults, the plan would delete the role; `prevent_destroy` stops it with "Instance cannot be destroyed" instead.
 - **`te_user_email`** is deprecated and ignored, and a future release removes it. Delete it from `terraform.tfvars` and from any `-var` arguments. It was documented as the token owner's address, but nothing used it (the provider needs only the token). Reusing it for the monitoring user would have made every existing configuration manage its owner's account.
 - **`account_group_id`** is new and optional. Leave it unset unless you set `monitoring_user`; then set it to the group the tests are in now (see [Account group](#account-group)).
+- **Account group.** Earlier versions always created a `ThousandEyes Monitoring Config` account group, which nothing used. A `removed` block now makes Terraform forget it without deleting it. The plan says it "will no longer be managed by Terraform", and the apply drops it from state. Terraform neither reads nor deletes the group, so a token without account group permissions can apply the upgrade. Apply it once in every workspace that created a group. The `monitoring_group_id` output is gone. The group stays in ThousandEyes. If nothing else uses it, delete it by hand in the UI, or with `DELETE /v7/account-groups/{aid}` and an Organization Admin token. `GET /v7/account-groups/{aid}?expand=user,agent` lists its users and agents first.

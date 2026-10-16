@@ -1,6 +1,6 @@
 terraform {
-  # 1.7 or later. terraform test needs 1.11 or later (mock_provider, and state_key in
-  # tests/role_upgrade.tftest.hcl).
+  # 1.7 or later (the removed block in permissions.tf). terraform test needs 1.11 or later
+  # (mock_provider, and state_key in the upgrade tests).
   required_version = ">= 1.7.0"
 
   required_providers {

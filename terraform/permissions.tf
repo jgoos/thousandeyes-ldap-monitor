@@ -3,17 +3,24 @@
 # its permission lookups exist only when monitoring_user is set: a role nobody holds grants
 # nothing, creating one needs an Organization Admin token (Edit roles), and the lookups need a
 # token that may call GET /v7/permissions. create_monitoring_role = true keeps the role without a
-# monitoring_user.
+# monitoring_user. With neither, this file makes no API calls, so a token that may only manage
+# tests and alert rules can run the configuration (README.md, Token).
 
 locals {
   create_monitoring_role = coalesce(var.create_monitoring_role, var.monitoring_user != null)
 }
 
-# Nothing uses this account group: the monitoring user holds its role in account_group_id.
-# Making it optional, so that a token without Organization Admin can run this configuration, is a
-# follow-up.
-resource "thousandeyes_account_group" "monitoring_config" {
-  account_group_name = "ThousandEyes Monitoring Config"
+# Earlier versions always created a "ThousandEyes Monitoring Config" account group that nothing
+# used. It needed an Organization Admin token on every plan, and every workspace made its own.
+# Terraform now forgets it without deleting it (README.md, Upgrading). A group made here could not
+# hold the tests: no test or alert rule resource takes an account group, and the provider's
+# account_group_id must be known when Terraform plans.
+removed {
+  from = thousandeyes_account_group.monitoring_config
+
+  lifecycle {
+    destroy = false
+  }
 }
 
 # The role takes permission IDs. The provider finds each ID by the permission's API name (the
