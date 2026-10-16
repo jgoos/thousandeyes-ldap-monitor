@@ -7,9 +7,19 @@
 # the real provider, pointed at a local port that refuses connections: any API call fails the run.
 # Targeting the group keeps every other resource out of those runs. Without the removed block,
 # upgrade_forgets_the_account_group fails with "connection refused": Terraform reads the group
-# (GET /account-groups/{id}) and then deletes it. With it, Terraform neither reads nor deletes the
-# group, so the upgrade needs no account group permission.
-mock_provider "thousandeyes" {}
+# (GET /account-groups/{id}) and then deletes it. With it, Terraform 1.9.3 or later neither reads
+# nor deletes the group in a normal plan and apply, so the upgrade needs no account group
+# permission. A destroy or a refresh-only plan would still call the API (README.md, Upgrading).
+mock_provider "thousandeyes" {
+  # A fixed ID: the provider takes an error that mentions 404 as "not found" and drops the object
+  # from state, which a random ID containing "404" could trigger.
+  mock_resource "thousandeyes_account_group" {
+    defaults = {
+      id  = "7001"
+      aid = "7001"
+    }
+  }
+}
 
 provider "thousandeyes" {
   alias        = "unreachable"

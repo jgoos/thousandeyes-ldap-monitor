@@ -4,7 +4,7 @@
 # nothing, creating one needs an Organization Admin token (Edit roles), and the lookups need a
 # token that may call GET /v7/permissions. create_monitoring_role = true keeps the role without a
 # monitoring_user. With neither, this file makes no API calls, so a token that may only manage
-# tests and alert rules can run the configuration (README.md, Token).
+# tests and alert rules should be able to run the configuration (README.md, Token).
 
 locals {
   create_monitoring_role = coalesce(var.create_monitoring_role, var.monitoring_user != null)

@@ -1,7 +1,8 @@
 terraform {
-  # 1.7 or later (the removed block in permissions.tf). terraform test needs 1.11 or later
-  # (mock_provider, and state_key in the upgrade tests).
-  required_version = ">= 1.7.0"
+  # 1.9.3 or later: before 1.9.3, Terraform still reads (GET) an object that a removed block
+  # forgets (hashicorp/terraform#35458), which a token without account group permissions fails.
+  # terraform test needs 1.11 or later (mock_provider, and state_key in the upgrade tests).
+  required_version = ">= 1.9.3"
 
   required_providers {
     thousandeyes = {
