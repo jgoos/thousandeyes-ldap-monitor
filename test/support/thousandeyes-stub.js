@@ -16,9 +16,10 @@
  *     in which case it behaves like Node's idle timeout and rejects the pending read().
  *
  * Configured through the TE_STUB_CONFIG environment variable (JSON):
- *   { credentials, settings, routes, enforceSocketTimeout }
+ *   { credentials, settings, routes, enforceSocketTimeout, stallCleanup }
  * `routes` maps "host:port" as the script sees it to "127.0.0.1:port" on the test machine,
  * or to "hang" for a connect that never completes. Unrouted targets are refused.
+ * `stallCleanup` makes writing an UnbindRequest and end() never complete.
  * Every observable call is appended as a JSON line to the file named by TE_STUB_TRACE.
  */
 import { appendFileSync } from 'node:fs';
@@ -39,6 +40,12 @@ const resolveRoute = (host, port) => {
   const [routeHost, routePort] = route.split(':');
   return { host: routeHost, port: Number(routePort) };
 };
+
+// A promise that never settles; the interval keeps the process alive, as a live runtime would.
+const stall = () => new Promise(() => { setInterval(() => {}, 60_000); });
+
+// LDAPMessage whose protocolOp is UnbindRequest ([APPLICATION 2] NULL): ends in 0x42 0x00.
+const isUnbindRequest = (buf) => buf.length >= 2 && buf[buf.length - 2] === 0x42 && buf[buf.length - 1] === 0x00;
 
 const refusedError = (host, port) =>
   Object.assign(new Error(`connect ECONNREFUSED ${host}:${port}`), { code: 'ECONNREFUSED' });
@@ -80,6 +87,7 @@ function wrapSocket(sock) {
     },
     writeAll(buf) {
       trace({ type: 'tx', hex: Buffer.from(buf).toString('hex') });
+      if (config.stallCleanup && isUnbindRequest(buf)) return stall();
       return new Promise((resolve, reject) => sock.write(buf, (err) => (err ? reject(err) : resolve())));
     },
     read() {
@@ -87,6 +95,7 @@ function wrapSocket(sock) {
     },
     end() {
       trace({ type: 'end' });
+      if (config.stallCleanup) return stall();
       return new Promise((resolve) => {
         if (sock.destroyed) return resolve();
         sock.end(() => resolve());

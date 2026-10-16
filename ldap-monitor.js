@@ -24,10 +24,11 @@ const MAX_RESPONSE_SIZE = 1000000; // 1MB safety limit for everything the server
 const TLS_ERROR_KEYWORDS = ['certificate', 'CERT_', 'SSL', 'TLS'];
 const CREDENTIAL_ALTERNATIVES = ['ldapbasedn', 'LdapBaseDN', 'LDAPBASEDN', 'ldap_base_dn', 'LDAP_BASE_DN'];
 const TLS_ERROR_CODE = /^(ERR_TLS_|ERR_SSL_|CERT_|UNABLE_TO_|DEPTH_ZERO_|SELF_SIGNED_)/;
+const NETWORK_ERROR_CODE = /^(ECONN|ETIMEDOUT|EHOST|ENET|ENOTFOUND|EAI_|EPIPE)/;
 const DEFAULT_TEST_TIMEOUT_S = 30; // ThousandEyes default transaction time limit
 const MAX_TEST_TIMEOUT_S = 180; // ThousandEyes maximum transaction time limit
 const MIN_TIME_MARGIN_MS = 1000; // left before the time limit for reporting
-const CLEANUP_TIMEOUT_MS = 1000; // for Unbind and socket close
+const CLEANUP_TIMEOUT_MS = 1000; // most that Unbind and socket close may take together
 const MAX_EMPTY_READS = 3; // consecutive empty reads treated as end of stream
 const MAX_DIAGNOSTIC_LENGTH = 200; // characters of server diagnosticMessage kept in errors
 
@@ -407,9 +408,20 @@ const describeError = (err) => {
   return err && err.code && !message.includes(err.code) ? `${message} (${err.code})` : message;
 };
 
-/** Whether a connect error came from TLS rather than from the network. */
-const isTlsError = (err) =>
-  TLS_ERROR_CODE.test(err && err.code || '') || TLS_ERROR_KEYWORDS.some((keyword) => describeError(err).includes(keyword));
+/**
+ * Whether a connect error came from TLS rather than from the network. The error code decides when
+ * there is one; otherwise the message is checked for TLS keywords with the host name removed, so
+ * a host such as "certificate-gw.example.com" does not make a network error look like TLS.
+ * @param {Error & { code?: string }} err
+ * @param {string} host
+ */
+const isTlsError = (err, host) => {
+  const code = err && err.code || '';
+  if (TLS_ERROR_CODE.test(code)) return true;
+  if (NETWORK_ERROR_CODE.test(code)) return false;
+  const message = (err && err.message || '').split(host).join('');
+  return TLS_ERROR_KEYWORDS.some((keyword) => message.includes(keyword));
+};
 
 /** IPv4 or IPv6 literal. TLS SNI must not carry an IP address (RFC 6066 section 3). */
 const isIpAddress = (host) => /^\d{1,3}(\.\d{1,3}){3}$/.test(host) || host.includes(':');
@@ -731,7 +743,7 @@ async function runTest() {
       break;
     } catch (err) {
       stopMarker(`ldap-attempt-${attempt}`);
-      const tlsFailure = port === 636 && isTlsError(err);
+      const tlsFailure = port === 636 && isTlsError(err, host);
       console.log(`${tlsFailure ? 'Certificate/TLS error on attempt' : 'Connection attempt'} ${attempt}${tlsFailure ? '' : ' failed'}: ${describeError(err)}`);
 
       if (tlsFailure) {
@@ -883,15 +895,20 @@ async function runTest() {
     console.log(`LDAP Monitor: PASS - Total ${totalTime}ms (connect: ${connectionTime}ms, bind: ${bindRTT}ms, search: ${searchRTT}ms)`);
 
   } finally {
-    /* End the LDAP session (RFC 4511 4.3), then close the socket; neither may hold up the result */
+    /* End the LDAP session (RFC 4511 4.3), then close the socket. Both share one short window:
+       at most CLEANUP_TIMEOUT_MS and half the time left before ThousandEyes ends the transaction,
+       so cleanup cannot push the result past the time limit. */
+    const timeLeftMs = probeStart + timeoutMs - Date.now();
+    const cleanupDeadline = Date.now() + Math.min(CLEANUP_TIMEOUT_MS, Math.max(0, timeLeftMs / 2));
+    const cleanupLeftMs = () => cleanupDeadline - Date.now();
     try {
-      await withTimeout(sock.writeAll(ldapMessage(MESSAGE_ID.unbind, unbindRequest())), CLEANUP_TIMEOUT_MS, 'Unbind');
+      await withTimeout(sock.writeAll(ldapMessage(MESSAGE_ID.unbind, unbindRequest())), cleanupLeftMs(), 'Unbind');
     } catch {
       // The server may already have closed the connection
     }
     if (typeof sock.end === 'function') {
       try {
-        await withTimeout(Promise.resolve(sock.end()), CLEANUP_TIMEOUT_MS, 'closing the socket');
+        await withTimeout(Promise.resolve(sock.end()), cleanupLeftMs(), 'closing the socket');
       } catch (closeErr) {
         console.error(`Error closing socket: ${describeError(closeErr)}`);
       }

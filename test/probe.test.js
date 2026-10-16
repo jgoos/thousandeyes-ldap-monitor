@@ -21,7 +21,7 @@ const entry = (size = 300) => ldap.searchEntry(2, DN, { cn: ['monitor'], descrip
  * Start a fake server for `scenario`, run the script against it once, then stop the server.
  * `credentials` are merged over a working default set; `settings` feed test.getSettings().
  */
-async function probe(scenario, { credentials = {}, settings, tls, routes, timeLimitMs, enforceSocketTimeout } = {}) {
+async function probe(scenario, { credentials = {}, settings, tls, routes, timeLimitMs, enforceSocketTimeout, stallCleanup } = {}) {
   const server = await startFakeLdap({ ...scenario, tls });
   const port = tls ? 636 : 389;
   try {
@@ -31,6 +31,7 @@ async function probe(scenario, { credentials = {}, settings, tls, routes, timeLi
       },
       settings,
       enforceSocketTimeout,
+      stallCleanup,
       routes: { [`${HOST}:${port}`]: `127.0.0.1:${server.port}`, ...routes?.(server.port) },
     }, { timeLimitMs });
     return { ...result, requests: server.requests };
@@ -370,6 +371,23 @@ describe('connection failures', () => {
     assert.equal(result.verdict, 'fail');
     assert.match(result.failure, /^Bind failed: waiting for the server response timed out after \d+ ms/);
     assert.ok(Date.now() - started < 2_000, 'the probe must give up before the 2 s time limit');
+  });
+
+  it('keeps a stalled Unbind and close within the test time limit', async () => {
+    const started = Date.now();
+    const result = await probe(
+      { bind: () => [] },
+      { credentials: { ldapBindOnly: 'true' }, settings: { timeout: 2 }, stallCleanup: true, timeLimitMs: 5_000 },
+    );
+    assert.equal(result.verdict, 'fail');
+    assert.match(result.failure, /^Bind failed: waiting for the server response timed out/);
+    assert.ok(Date.now() - started < 2_000, 'cleanup must not run past the 2 s time limit');
+  });
+
+  it('retries a refused LDAPS connection even when the host name contains a TLS keyword', async () => {
+    const result = await runProbe({ credentials: { ldapMonUser: DN, ldapMonPass: PASSWORD, ldapHost: 'tls-certificate-gw.test', ldapPort: '636' } });
+    assert.equal(eventsOf(result, 'connectTls').length, 3);
+    assert.match(result.failure, /^Connection failed after 3 attempts: connect ECONNREFUSED/);
   });
 
   it('treats a timeout above the 180 s maximum as milliseconds', async () => {
