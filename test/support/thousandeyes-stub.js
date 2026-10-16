@@ -18,12 +18,13 @@
  *     documented for ThousandEyes, so `peerCertificate` can take getPeerCertificate() away.
  *
  * Configured through the TE_STUB_CONFIG environment variable (JSON):
- *   { credentials, settings, routes, enforceSocketTimeout, stallCleanup, peerCertificate }
+ *   { credentials, settings, routes, enforceSocketTimeout, stallCleanup, peerCertificate, failWrite }
  * `routes` maps "host:port" as the script sees it to "127.0.0.1:port" on the test machine,
  * or to "hang" for a connect that never completes. Unrouted targets are refused.
  * `stallCleanup` makes writing an UnbindRequest and end() never complete.
  * `peerCertificate` changes getPeerCertificate() on TLS sockets: 'absent' leaves it out,
  * 'throws' makes it throw, and an object is returned in place of the real certificate.
+ * `failWrite` ('bind' or 'search') makes writeAll() reject that request with EPIPE.
  * Every observable call is appended as a JSON line to the file named by TE_STUB_TRACE.
  */
 import { appendFileSync } from 'node:fs';
@@ -50,6 +51,14 @@ const stall = () => new Promise(() => { setInterval(() => {}, 60_000); });
 
 // LDAPMessage whose protocolOp is UnbindRequest ([APPLICATION 2] NULL): ends in 0x42 0x00.
 const isUnbindRequest = (buf) => buf.length >= 2 && buf[buf.length - 2] === 0x42 && buf[buf.length - 1] === 0x00;
+
+// protocolOp tag of an LDAPMessage: skip the SEQUENCE header, then the messageID INTEGER.
+const opTagOf = (buf) => {
+  let pos = 1 + (buf[1] & 0x80 ? 1 + (buf[1] & 0x7f) : 1);
+  pos += 2 + buf[pos + 1];
+  return buf[pos];
+};
+const FAIL_WRITE_TAGS = { bind: 0x60, search: 0x63 };
 
 const refusedError = (host, port) =>
   Object.assign(new Error(`connect ECONNREFUSED ${host}:${port}`), { code: 'ECONNREFUSED' });
@@ -92,6 +101,9 @@ function wrapSocket(sock) {
     writeAll(buf) {
       trace({ type: 'tx', hex: Buffer.from(buf).toString('hex') });
       if (config.stallCleanup && isUnbindRequest(buf)) return stall();
+      if (config.failWrite && opTagOf(Buffer.from(buf)) === FAIL_WRITE_TAGS[config.failWrite]) {
+        return Promise.reject(Object.assign(new Error('write EPIPE'), { code: 'EPIPE' }));
+      }
       return new Promise((resolve, reject) => sock.write(buf, (err) => (err ? reject(err) : resolve())));
     },
     read() {
