@@ -6,7 +6,8 @@ import path from 'node:path';
 
 /**
  * @param {string[]} subjectAltNames  e.g. ['DNS:ldap.test', 'IP:127.0.0.1']
- * @returns {{ caPem: string, key: string, cert: string } | null}  null when openssl is unavailable
+ * @returns {{ caPem: string, key: string, cert: string } | null}  null when openssl is not installed
+ * @throws {Error} when openssl is installed but certificate generation fails
  */
 export function createTlsFixture(subjectAltNames) {
   const dir = mkdtempSync(path.join(tmpdir(), 'ldap-monitor-tls-'));
@@ -26,8 +27,11 @@ export function createTlsFixture(subjectAltNames) {
       key: readFileSync(file('server.key'), 'utf8'),
       cert: readFileSync(file('server.pem'), 'utf8'),
     };
-  } catch {
-    return null;
+  } catch (err) {
+    // Only a missing openssl binary makes the LDAPS tests skip; any other failure must surface,
+    // or TLS coverage would disappear while the run stays green.
+    if (err.code === 'ENOENT') return null;
+    throw err;
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
