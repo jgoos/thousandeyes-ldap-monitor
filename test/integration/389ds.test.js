@@ -48,6 +48,7 @@ describe('389 Directory Server', { skip: configured ? false : 'run via npm run t
   it('fails over LDAPS when the server CA is not trusted', async () => {
     const result = await run({ ldapPort: '636', ldapBindOnly: 'true' });
     assert.equal(result.verdict, 'fail');
+    assert.match(result.failure, /^TLS handshake with .* failed: .*(self[- ]signed|unable to verify)/i);
   });
 
   it('reaches a search pass without the "response corruption" fallback (B2/S1)', async () => {

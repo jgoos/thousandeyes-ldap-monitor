@@ -12,12 +12,10 @@ export default [
     },
   },
   {
-    // Existing findings in the script, reported as warnings until the protocol and transport
-    // rewrites fix them (unused catch bindings, dropped error causes: audit B13).
+    // ldapBaseDN is read but not used yet (audit B17); a warning until the config change fixes it.
     files: ['ldap-monitor.js'],
     rules: {
       'no-unused-vars': 'warn',
-      'preserve-caught-error': 'warn',
     },
   },
 ];

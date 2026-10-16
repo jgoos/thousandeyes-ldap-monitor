@@ -50,7 +50,7 @@ Create these secure credential entries:
 
 **CA Certificate (LDAPS only):**
 - **Name:** `ldapCaBase64`
-- **Value:** Base64-encoded CA certificate(s) for LDAPS connections with self-signed or custom certificates
+- **Value:** CA certificate(s) for LDAPS connections with self-signed or custom certificates, as PEM text or base64-encoded PEM
 - **Agent Access:** Tick the same agents (only needed if using custom certificates with LDAPS)
 - **Note:** Leave empty or omit if using system CA certificates
 
@@ -149,10 +149,10 @@ All settings are configured through ThousandEyes Secure Credentials:
 When optional credentials are not provided, the script uses these defaults:
 - **Host:** `ldap.example.com` (override with `ldapHost` credential)
 - **Port:** `636` for LDAPS (override with `ldapPort` credential)
-- **Timeout:** Test timeout from ThousandEyes (typically 5000ms)
+- **Timeout:** The test's time limit from ThousandEyes (default 30 seconds). Every connect and read is bounded by it, and the script stops about 10% early (at least 1 second) so that its own timeout error is reported
 - **Slow threshold:** `300ms` for both bind and search operations
 - **Base DN:** Uses bind DN for base scope search (override with `ldapBaseDN` credential)
-- **Retry attempts:** 2 with 100ms delay between attempts
+- **Retry attempts:** up to 2 retries of a failed connection, 100ms apart, within the time limit. TLS and certificate errors are not retried
 - **TLS version:** Minimum TLSv1.2 for LDAPS connections
 - **Debug mode:** Disabled (enable with `ldapDebugMode=true` credential)
 - **Bind-only mode:** Disabled (enable with `ldapBindOnly=true` credential)
@@ -188,7 +188,7 @@ The script will throw errors (causing test failure) if:
 4. Verify credential access is enabled in the script editor (key icon)
 5. For LDAPS with custom certificates, ensure `ldapCaBase64` credential is properly configured
 
-#### "Connection failed after X attempts"
+#### "Connection failed after X attempts: …"
 **Cause:** Network connectivity issues or LDAP server is down.
 
 **Solution:**
@@ -198,13 +198,13 @@ The script will throw errors (causing test failure) if:
 4. Test connectivity manually: `telnet ldap.example.com 636`
 5. Verify TLS version compatibility (script requires TLS 1.2 minimum, supports 1.3)
 
-#### "TLS/Certificate validation failed"
+#### "TLS handshake with host:636 failed: …"
 **Cause:** LDAPS certificate validation failed due to self-signed or custom CA certificates.
 
 **Solution:**
 1. For self-signed certificates, configure the `ldapCaBase64` credential with your CA certificate
-2. Convert your CA certificate to base64: `base64 -w 0 ca-certificate.pem`
-3. Store the entire base64 string in the `ldapCaBase64` secure credential
+2. Store the CA certificate in the `ldapCaBase64` secure credential, either as PEM text or base64-encoded (`base64 -w 0 ca-certificate.pem`)
+3. The text after "failed:" is the TLS library's reason, for example `self-signed certificate in certificate chain`
 4. Ensure the certificate chain is complete if using intermediate CAs
 5. Enable debug mode (`ldapDebugMode: true`) to see detailed TLS handshake information
 
@@ -334,8 +334,8 @@ This mode skips the search operation and reports success after a successful bind
 For LDAPS connections with self-signed or custom CA certificates, provide the certificate in base64 format:
 
 1. Obtain your CA certificate in PEM format
-2. Convert to base64: `base64 -w 0 ca-certificate.pem`
-3. Store the base64 string in the `ldapCaBase64` credential
+2. Store it in the `ldapCaBase64` credential as PEM text, or base64-encoded: `base64 -w 0 ca-certificate.pem`
+3. Line breaks that the credential field turns into spaces are restored
 4. The script supports certificate chains (multiple certificates in one PEM file)
 
 ### Configuration Examples
