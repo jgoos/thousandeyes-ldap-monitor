@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "description": "Self-contained ThousandEyes script that performs LDAP/LDAPS bind + search operations and alerts on latency. Only ldap-monitor.js is used in ThousandEyes platform.",
+  "description": "Self-contained ThousandEyes transaction script that checks an LDAP/LDAPS server: bind, base-scope search and Root DSE checks, with a marker per step for latency alerts. Only ldap-monitor.js runs in ThousandEyes.",
   "main": "ldap-monitor.js",
   "scripts": {
     "lint": "eslint .",
@@ -39,7 +39,6 @@
   },
   "files": [
     "ldap-monitor.js",
-    "ldap-monitor-config.example.js",
     "README.md"
   ]
 }
