@@ -1,6 +1,6 @@
 # ThousandEyes LDAP Monitoring Terraform Module
 
-This directory contains Terraform configuration that automates LDAP monitoring with ThousandEyes. It deploys one transaction test per LDAP server, running `ldap-monitor.js`, with an alert rule for failed or timed-out runs and latency alert rules for slow steps. It also creates a role and an account group for monitoring administration.
+This directory contains Terraform configuration that automates LDAP monitoring with ThousandEyes. It deploys one transaction test per LDAP server, running `ldap-monitor.js`, with an alert rule for failed or timed-out runs and latency alert rules for slow steps. It can also create a least-privilege role and a dedicated monitoring user (opt-in).
 
 Each test's URL is an LDAP URL (RFC 4516), such as `ldaps://dc1.example.com:636/` or `ldaps://dc1.example.com:3269/DC=example,DC=com`. The script reads its target from the URL, so every test monitors its own server.
 
@@ -9,7 +9,7 @@ Each test's URL is an LDAP URL (RFC 4516), such as `ldaps://dc1.example.com:636/
 - [Terraform](https://www.terraform.io/) 1.7 or later (`terraform test` uses provider mocking).
 - Access to a ThousandEyes account.
 - **Initial setup requirement:** the API token used for the first `terraform apply` must belong to a user with permissions to create roles and groups (for example, a user with the `Account Admin` role).
-- The script's credentials, created in the ThousandEyes UI (`Network & App Synthetics ▸ Test Settings ▸ Credentials Repository ▸ Add New Credential`) or API: `ldapMonUser`, `ldapMonPass`, and any optional ones you use (`ldapCaBase64`, `ldapAllowCleartext`, ...). Terraform attaches them to the tests by ID only, so their values never enter Terraform state. List their IDs with `GET /v7/credentials`.
+- The script's credentials, created in the ThousandEyes UI or API (`Settings ▸ Secure Credentials`): `ldapMonUser`, `ldapMonPass`, and any optional ones you use (`ldapCaBase64`, `ldapAllowCleartext`, ...). Terraform attaches them to the tests by ID only, so their values never enter Terraform state. List their IDs with `GET /v7/credentials`.
 
 ## Configuration
 

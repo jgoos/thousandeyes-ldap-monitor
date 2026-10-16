@@ -23,7 +23,7 @@ This repository contains a JavaScript monitoring script designed for ThousandEye
 - **`terraform/`** - Creates one test per server, plus the failure and latency alert rules ([terraform/README.md](terraform/README.md))
 - **`test/`** - Test harness: unit tests against scripted LDAP responses, and an integration test against 389 Directory Server
 - **`docs/DESIGN_DOCUMENT.md`** - Design for a multi-region deployment
-- **`docs/MONITORING_GROUP_GUIDE.md`** - Setting up a ThousandEyes role and group for monitoring administration
+- **`docs/MONITORING_GROUP_GUIDE.md`** - Setting up the monitoring role and user in the ThousandEyes UI
 - **`docs/diagrams/`** - Generator for the architecture diagrams
 - **`package.json`**, **`eslint.config.js`** - Development tooling
 
@@ -122,9 +122,9 @@ Click `Create New Test` - data starts flowing immediately.
 
 ## Deploying with Terraform
 
-`terraform/` creates one transaction test per LDAP server, each with an LDAP URL built from `hostname`, `port`, `tls` and `base_dn`, plus the failure alert rule and one latency alert rule per entry in `marker_alert_thresholds_ms`. It needs Terraform 1.7 or later, because `terraform test` uses provider mocking, and pins the ThousandEyes provider to an exact version. The credentials are created outside Terraform and attached by ID (`credential_ids`), so their values stay out of Terraform state. Variables, examples and the alert expressions are in [terraform/README.md](terraform/README.md).
+`terraform/` creates one transaction test per LDAP server, each with an LDAP URL built from `hostname`, `port`, `tls` and `base_dn`, plus the failure alert rule and one latency alert rule per entry in `marker_alert_thresholds_ms`. It needs Terraform 1.7 or later ([terraform/README.md](terraform/README.md) gives the version `terraform test` needs) and pins the ThousandEyes provider to an exact version. The credentials are created outside Terraform and attached by ID (`credential_ids`), so their values stay out of Terraform state. Variables, examples and the alert expressions are in [terraform/README.md](terraform/README.md).
 
-Terraform can optionally create a dedicated monitoring user with a least-privilege role (`monitoring_user`); see [terraform/README.md](terraform/README.md#monitoring-user-and-role).
+Terraform can optionally create a dedicated monitoring user with a least-privilege role (`monitoring_user`, `create_monitoring_role`); see [terraform/README.md](terraform/README.md#monitoring-user-and-role). With the defaults it creates neither, and its API token needs no Organization Admin: only the monitoring permissions in the tests' account group.
 
 ## Upgrading from earlier versions
 
@@ -342,7 +342,7 @@ marker_alert_thresholds_ms = {
 }
 ```
 
-Every test in one Terraform configuration carries the same latency rules. For different thresholds per server type, use separate configurations or workspaces. Each apply also creates the `ThousandEyes Monitoring Config` account group (and the role, where the configuration creates it), so a second workspace creates duplicates or name conflicts; keep that RBAC in one workspace. The configuration cannot skip it yet: making it optional is a follow-up.
+Every test in one Terraform configuration carries the same latency rules. For different thresholds per server type, use separate configurations or workspaces. The configuration creates no account group, and the role and user are opt-in (`monitoring_user`, `create_monitoring_role`): enable them in one workspace only, or each workspace creates its own role.
 
 #### Optimizing Search Operations
 The search is kept small:
