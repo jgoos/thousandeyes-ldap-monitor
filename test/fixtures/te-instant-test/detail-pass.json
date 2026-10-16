@@ -1,0 +1,21 @@
+{
+  "results": [
+    {
+      "date": "2026-10-16T21:00:12Z",
+      "roundId": 1792184400,
+      "startTime": 1792184400,
+      "endTime": 1792184401,
+      "agent": { "agentId": "125", "agentName": "Example Enterprise Agent", "countryId": "NL", "location": "Amsterdam, Netherlands" },
+      "componentErrors": 0,
+      "transactionTime": 412,
+      "markers": [
+        { "name": "ldap-attempt-1", "duration": 41 },
+        { "name": "ldaps-ssl-handshake", "duration": 41 },
+        { "name": "ldap-bind", "duration": 12 },
+        { "name": "ldap-search", "duration": 6 }
+      ],
+      "pages": []
+    }
+  ],
+  "test": { "testId": "7012345", "type": "web-transactions" }
+}

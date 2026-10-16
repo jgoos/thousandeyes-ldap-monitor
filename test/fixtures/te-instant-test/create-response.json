@@ -1,0 +1,19 @@
+{
+  "testId": "7012345",
+  "testName": "ldap-monitor validation 2026-10-16T21:00:00.000Z",
+  "type": "web-transactions",
+  "url": "ldaps://ldap.example.com:636/",
+  "timeLimit": 30,
+  "targetTime": 10,
+  "flagCollectConsoleLogs": true,
+  "credentials": ["3247", "1051"],
+  "agents": [
+    { "agentId": "125", "agentName": "Example Enterprise Agent", "agentType": "enterprise-cluster" }
+  ],
+  "_links": {
+    "self": { "href": "https://api.thousandeyes.com/v7/tests/web-transactions/7012345" },
+    "testResults": [
+      { "href": "https://api.thousandeyes.com/v7/test-results/7012345/web-transactions" }
+    ]
+  }
+}

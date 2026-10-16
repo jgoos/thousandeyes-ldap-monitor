@@ -1,0 +1,15 @@
+{
+  "results": [
+    {
+      "date": "2026-10-16T21:00:12Z",
+      "roundId": 1792184400,
+      "agent": { "agentId": "125", "agentName": "Example Enterprise Agent" },
+      "consoleLogs": [
+        { "level": "INFO", "timestamp": 1792184400120, "value": "Establishing LDAPS connection with system CA certificates" },
+        { "level": "INFO", "timestamp": 1792184400161, "value": "TLS cipher: TLS_AES_256_GCM_SHA384; peer CN: ldap.example.com" },
+        { "level": "INFO", "timestamp": 1792184400180, "value": "LDAP Monitor: PASS - Total 59ms (connect: 41ms, bind: 12ms, search: 6ms)" }
+      ]
+    }
+  ],
+  "test": { "testId": "7012345", "type": "web-transactions" }
+}
