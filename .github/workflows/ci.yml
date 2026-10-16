@@ -42,7 +42,7 @@ jobs:
           CONTAINER_RUNTIME: docker
 
   terraform:
-    name: Terraform fmt and validate
+    name: Terraform fmt, validate and test
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -56,3 +56,4 @@ jobs:
       - run: terraform fmt -check -recursive
       - run: terraform init -backend=false -input=false
       - run: terraform validate
+      - run: terraform test
