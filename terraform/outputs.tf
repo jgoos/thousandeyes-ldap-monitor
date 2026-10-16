@@ -4,8 +4,13 @@ output "monitoring_group_id" {
 }
 
 output "monitoring_role_id" {
-  description = "ID of the Monitoring Administrator role"
-  value       = thousandeyes_role.monitoring_config_admin.role_id
+  description = "ID of the Monitoring Administrator role; null without monitoring_user"
+  value       = one(thousandeyes_role.monitoring_config_admin[*].role_id)
+}
+
+output "monitoring_user_id" {
+  description = "ID of the user that holds the Monitoring Administrator role; null without monitoring_user"
+  value       = one(thousandeyes_user.monitoring[*].uid)
 }
 
 output "ldap_alert_rule_id" {

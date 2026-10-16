@@ -4,9 +4,55 @@ variable "te_api_token" {
   sensitive   = true
 }
 
-variable "te_user_email" {
-  description = "Email address associated with API token"
-  type        = string
+variable "monitoring_user" {
+  description = <<-EOT
+    Optional user that Terraform creates and gives the Monitoring Administrator role in the
+    ThousandEyes Monitoring Config account group. Null (the default) creates neither the user nor
+    the role.
+    - email: a dedicated account, never the API token owner's or a person's. Terraform owns the
+      user: the API replaces a user's role assignments as a whole, so this becomes the user's
+      only one, and destroy deletes the user.
+    - name: display name; defaults to the email address.
+  EOT
+  type = object({
+    email = string
+    name  = optional(string)
+  })
+  default = null
+
+  validation {
+    condition     = var.monitoring_user == null || can(regex("^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$", var.monitoring_user.email))
+    error_message = "monitoring_user.email must be an email address."
+  }
+}
+
+variable "monitoring_role_permissions" {
+  description = <<-EOT
+    Permissions of the Monitoring Administrator role, as UI label => API permission name. The
+    provider resolves each name (the "permission" field of GET /v7/permissions, not the label)
+    to its ID. Used only when monitoring_user is set. README.md says what each permission is for
+    and how to list the names in your account.
+  EOT
+  type        = map(string)
+  default = {
+    "API access"                       = "API_ACCESS"
+    "View tests"                       = "SETTINGS_TESTS_READ"
+    "Edit tests and run instant tests" = "SETTINGS_TESTS_UPDATE"
+    "Create web transaction tests"     = "SETTINGS_TESTS_CREATE_TX_TESTS"
+    "View alert rules"                 = "SETTINGS_ALERTS_READ"
+    "Edit alert rules"                 = "SETTINGS_ALERTS_UPDATE"
+    "View agents in account group"     = "SETTINGS_AGENTS_READ"
+  }
+
+  validation {
+    condition     = length(var.monitoring_role_permissions) > 0
+    error_message = "The role needs at least one permission."
+  }
+
+  validation {
+    condition     = alltrue([for name in values(var.monitoring_role_permissions) : can(regex("^[A-Z][A-Z0-9_]*$", name))])
+    error_message = "Use API permission names such as SETTINGS_TESTS_UPDATE (the \"permission\" field of GET /v7/permissions) as values, not UI labels such as \"Edit tests\"."
+  }
 }
 
 variable "ldap_servers" {

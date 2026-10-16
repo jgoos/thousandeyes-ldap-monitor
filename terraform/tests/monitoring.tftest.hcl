@@ -3,7 +3,6 @@ mock_provider "thousandeyes" {}
 
 variables {
   te_api_token   = "mock-token"
-  te_user_email  = "monitor@example.com"
   agent_ids      = ["1001"]
   credential_ids = ["2001", "2002"]
 }
