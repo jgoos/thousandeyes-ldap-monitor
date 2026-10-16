@@ -23,6 +23,9 @@ config.local.js
 test-results/
 coverage/
 
+# Diagram generator virtual environment (docs/diagrams/Makefile)
+docs/diagrams/venv/
+
 # Temporary files
 *.tmp
 *.bak

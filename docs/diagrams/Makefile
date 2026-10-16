@@ -10,7 +10,7 @@ all: generate
 generate:
 	@echo "🚀 Generating LDAP monitoring diagrams..."
 	@python3 -m venv venv --upgrade-deps || true
-	@. venv/bin/activate && pip install -q diagrams graphviz pillow
+	@. venv/bin/activate && pip install -q -r requirements.txt
 	@. venv/bin/activate && python3 ldap_monitoring.py
 
 # List all generated files
