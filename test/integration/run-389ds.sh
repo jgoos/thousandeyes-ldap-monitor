@@ -43,7 +43,9 @@ done
 "$RUNTIME" exec "$NAME" dsconf localhost backend create \
   --suffix "$SUFFIX" --be-name userroot --create-suffix --create-entries >/dev/null
 
-# The ACI lets the monitor account read its own entry, as most directories allow by default.
+# The ACI lets the monitor account read the suffix, as a monitoring account typically can. With
+# less access, 389 DS answers a search for a missing base DN with success and no entries rather
+# than noSuchObject, so it does not reveal which entries exist.
 "$RUNTIME" exec -i "$NAME" ldapadd -x -H ldap://localhost:3389 -D "cn=Directory Manager" -w "$DM_PASSWORD" >/dev/null <<EOF
 dn: $BIND_DN
 objectClass: top
@@ -57,7 +59,7 @@ userPassword: $BIND_PASSWORD
 dn: $SUFFIX
 changetype: modify
 add: aci
-aci: (targetattr="*")(version 3.0; acl "self read"; allow (read,search,compare) userdn="ldap:///self";)
+aci: (targetattr="*")(version 3.0; acl "monitor read"; allow (read,search,compare) userdn="ldap:///$BIND_DN";)
 EOF
 
 "$RUNTIME" exec "$NAME" cat /etc/dirsrv/slapd-localhost/Self-Signed-CA.pem > "$WORK_DIR/ca.pem"

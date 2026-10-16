@@ -2,19 +2,26 @@
  * ThousandEyes Transaction — LDAP health probe
  *
  * • Authenticated LDAPv3 simple bind
- * • LDAP search with objectClass filter for maximum compatibility
+ * • Base-scope search of the Root DSE, or of a configured base DN
  * • Fails (throws) on error or if either round-trip exceeds `slowMs`
+ *
+ * Target: the test URL, as an RFC 4516 LDAP URL
+ *   ldaps://ldap.example.com            LDAPS on port 636, search the Root DSE
+ *   ldaps://ldap.example.com:3269/dc=example,dc=com
+ *   ldap://ldap.example.com:389         plain LDAP; needs ldapAllowCleartext (see below)
+ * When the test URL is not an LDAP URL, the ldapHost/ldapPort credentials are used instead.
  *
  * Secure Credentials required:
  *   ldapMonUser  →  full bind DN   (e.g. "cn=monitor,ou=svc,dc=example,dc=com")
  *   ldapMonPass  →  password
- *   ldapCaBase64 →  CA certificate(s) in base64-encoded format for LDAPS connections
  *
- * Optional Configuration Credentials (override defaults):
- *   ldapHost     →  LDAP server hostname
- *   ldapPort     →  LDAP server port (389 for LDAP, 636 for LDAPS)
- *   ldapBaseDN   →  Base DN for search (empty = Root DSE)
- *   ldapDebugMode →  'true' for verbose debugging (default: false)
+ * Optional Credentials:
+ *   ldapCaBase64       →  CA certificate(s) for LDAPS, as PEM text or base64-encoded PEM
+ *   ldapHost, ldapPort →  server and port (389 or 636) when the test URL is not an LDAP URL
+ *   ldapBaseDN         →  search base when the test URL has no DN (default: Root DSE)
+ *   ldapAllowCleartext →  'true' to allow sending the password without TLS (RFC 4513 5.1.3)
+ *   ldapBindOnly       →  'true' to skip the search
+ *   ldapDebugMode      →  'true' for verbose debugging (default: false)
  */
 
 import { net, credentials, test, markers } from 'thousandeyes';
@@ -462,13 +469,76 @@ const stopMarker = (name) => {
   }
 };
 
+/* ───────────── Target configuration ───────────── */
+
+const configError = (message) => new Error(`Configuration error: ${message}`);
+
+/** Credential flag: 'true', '1' or 'yes', in any letter case. */
+const isEnabled = (value) => ['true', '1', 'yes'].includes(String(value || '').trim().toLowerCase());
+
 /**
- * Get configuration from secure credentials with fallback defaults
+ * Parse an RFC 4516 LDAP URL: ldap[s]://host[:port][/dn[?attributes?scope?filter?extensions]].
+ * The scheme picks TLS, the port defaults to 389 or 636, and the DN is the search base.
+ * Attributes, scope, filter and extensions must be empty: the probe always runs a base-scope
+ * (objectClass=*) search that returns no attributes.
+ * @param {unknown} url - test.getSettings().url
+ * @returns {{ host: string, port: number, tls: boolean, baseDN: string } | null}
+ *   null when `url` is not an ldap:// or ldaps:// URL
+ * @throws {Error} a configuration error for a malformed LDAP URL
+ */
+function parseLdapUrl(url) {
+  const text = String(url || '').trim();
+  if (!/^ldaps?:\/\//i.test(text)) return null;
+  const match = /^(ldaps?):\/\/(\[[^\]]*\]|[^:/?#]*)(?::(\d*))?(?:\/([^?#]*)(\?[^#]*)?)?$/i.exec(text);
+  if (!match) throw configError(`the test URL "${text}" is not a valid LDAP URL`);
+  const [, scheme, rawHost, rawPort, rawDN = '', query = ''] = match;
+  const tls = scheme.toLowerCase() === 'ldaps';
+  const host = rawHost.replace(/^\[|\]$/g, '');
+  if (!host) throw configError(`the test URL "${text}" has no host`);
+  const port = rawPort ? Number(rawPort) : (tls ? 636 : 389);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) throw configError(`the test URL "${text}" has an invalid port`);
+  if (query.slice(1).split('?').some((part) => part !== '')) {
+    throw configError('LDAP URL attributes, scope, filter and extensions are not supported; give only the base DN after the host');
+  }
+  let baseDN;
+  try {
+    baseDN = decodeURIComponent(rawDN);
+  } catch {
+    throw configError(`the DN in the test URL "${text}" has invalid percent-encoding`);
+  }
+  return { host, port, tls, baseDN };
+}
+
+/**
+ * Where to connect and what to search. The test URL wins when it is an LDAP URL; otherwise the
+ * ldapHost and ldapPort credentials are used, with port 636 meaning LDAPS. The search base is the
+ * URL's DN, else the ldapBaseDN credential, else the Root DSE ("").
+ * @returns {{ host: string, port: number, tls: boolean, baseDN: string, source: string }}
+ * @throws {Error} a configuration error when no server is configured or the URL is malformed
+ */
+function resolveTarget({ testUrl, ldapHost, ldapPort, ldapBaseDN }) {
+  const fromUrl = parseLdapUrl(testUrl);
+  if (fromUrl) return { ...fromUrl, baseDN: fromUrl.baseDN || ldapBaseDN, source: 'test URL' };
+
+  const host = String(ldapHost || '').trim();
+  if (!host) {
+    throw configError('no LDAP server configured. Set the test URL to ldaps://<host> (or ldap://<host>:389), or set the ldapHost credential');
+  }
+  const port = parseInt(ldapPort, 10) || 636;
+  if (port !== 389 && port !== 636) {
+    throw new Error(`Invalid port ${port}: Must be 389 (LDAP) or 636 (LDAPS) in the ldapPort credential; use an ldap:// or ldaps:// test URL for other ports`);
+  }
+  return { host, port, tls: port === 636, baseDN: ldapBaseDN, source: 'ldapHost credential' };
+}
+
+/**
+ * Settings from the test and from Secure Credentials, before validation.
  * Uses secure credentials for configuration since testVars are not available
  */
 const getTestConfig = () => {
-  // Get test timeout defensively for TypeScript compatibility
+  // Get test settings defensively for TypeScript compatibility
   let testTimeout = null;
+  let testUrl = '';
   
   if (test && 'getSettings' in test) {
     try {
@@ -477,6 +547,7 @@ const getTestConfig = () => {
         const settings = getSettingsMethod.call(test);
         if (settings) {
           testTimeout = settings.timeout;
+          testUrl = settings.url;
         }
       }
     } catch {
@@ -509,28 +580,19 @@ const getTestConfig = () => {
     }
   }
 
-  // Handle whitespace-only values
-  if (ldapBaseDN && typeof ldapBaseDN === 'string') {
-    ldapBaseDN = ldapBaseDN.trim();
-    if (ldapBaseDN === '') {
-      ldapBaseDN = null;
-    }
-  }
-  
-  // Check for bind-only monitoring mode
-  const ldapBindOnly = getCredential('ldapBindOnly');
-
   // Configuration with secure credentials and sensible defaults
   return {
-    host: ldapHost || 'ldap.example.com',
-    port: parseInt(ldapPort) || 636,
+    testUrl,
+    ldapHost,
+    ldapPort,
+    ldapBaseDN: typeof ldapBaseDN === 'string' ? ldapBaseDN.trim() : '',
+    allowCleartext: isEnabled(getCredential('ldapAllowCleartext')),
     timeoutMs: testTimeLimitMs(testTimeout),
     slowMs: 300,
-    baseDN: ldapBaseDN || 'USE_BIND_DN',
     retryDelayMs: 100,
     maxRetries: 2,
     tlsMinVersion: 'TLSv1.2',
-    bindOnlyMode: ldapBindOnly === 'true' || ldapBindOnly === '1' || ldapBindOnly === 'yes'
+    bindOnlyMode: isEnabled(getCredential('ldapBindOnly'))
   };
 };
 
@@ -543,15 +605,13 @@ async function runTest() {
 
   /* ─────────── dynamic configuration loaded ─────────── */
   const {
-    host,
-    port,
     timeoutMs,
     slowMs,
-    baseDN,
     retryDelayMs,
     maxRetries,
     tlsMinVersion,
-    bindOnlyMode
+    bindOnlyMode,
+    allowCleartext
   } = cfg;
   
   // Helper function for secure credential access  
@@ -575,21 +635,22 @@ async function runTest() {
   const bindPwd = getCredential('ldapMonPass');
   const caBase64 = getCredential('ldapCaBase64');
   
-  if (debugMode) {
-    console.log('Debug: Using bind DN as search base');
-  }
-  
-  if (debugMode && port === 636) {
-    console.log(`Debug: LDAPS mode with ${caBase64 ? 'custom' : 'system'} certificates`);
-  }
-  
   /* Input validation */
   if (!bindDN || !bindPwd) {
     throw new Error('Missing credentials: Ensure ldapMonUser and ldapMonPass are configured');
   }
 
-  if (port !== 389 && port !== 636) {
-    throw new Error(`Invalid port ${port}: Must be 389 (LDAP) or 636 (LDAPS)`);
+  const { host, port, tls: useTls, baseDN, source } = resolveTarget(cfg);
+  if (debugMode) {
+    console.log(`Debug: Target ${useTls ? 'ldaps' : 'ldap'}://${host}:${port} from the ${source}; search base ${baseDN ? `"${baseDN}"` : 'Root DSE'}`);
+  }
+
+  // A simple bind sends the password as is; without TLS anyone on the path can read it.
+  if (!useTls) {
+    if (!allowCleartext) {
+      throw configError(`refusing to send the bind password to ${host}:${port} without TLS (RFC 4513 section 5.1.3). Use ldaps://, or set the ldapAllowCleartext credential to true to accept the risk`);
+    }
+    console.log(`Warning: sending the bind password to ${host}:${port} without TLS (ldapAllowCleartext is set)`);
   }
 
   if (slowMs <= 0) {
@@ -700,11 +761,11 @@ async function runTest() {
     searchEnd: null
   };
 
-  /* 1 ▸ Open the socket (TLS on port 636) */
+  /* 1 ▸ Open the socket (TLS for ldaps://, or port 636 from the credentials) */
   // Certificate problems and bad CA configuration will not go away on retry, so they fail at once;
   // other connect errors are retried while the time budget allows.
   let tlsOptions;
-  if (port === 636) {
+  if (useTls) {
     tlsOptions = { minVersion: tlsMinVersion, rejectUnauthorized: true };
     if (!isIpAddress(host)) tlsOptions.servername = host;
     if (caBase64) {
@@ -720,7 +781,7 @@ async function runTest() {
 
   // ThousandEyes rejects restarting a marker, so the connect marker spans all attempts and each
   // attempt has its own marker.
-  const connectMarkerName = port === 636 ? 'ldaps-ssl-handshake' : 'ldap-tcp-connect';
+  const connectMarkerName = useTls ? 'ldaps-ssl-handshake' : 'ldap-tcp-connect';
   const closeQuietly = (lateSocket) => {
     try {
       if (lateSocket && typeof lateSocket.end === 'function') lateSocket.end();
@@ -736,14 +797,14 @@ async function runTest() {
     if (attempt === 1) startMarker(connectMarkerName);
     metrics.connectionStart = Date.now();
     try {
-      const connecting = port === 636 ? net.connectTls(port, host, tlsOptions) : net.connect(port, host);
+      const connecting = useTls ? net.connectTls(port, host, tlsOptions) : net.connect(port, host);
       sock = await withTimeout(connecting, remainingMs(), `connect to ${host}:${port}`, closeQuietly);
       metrics.connectionEnd = Date.now();
       stopMarker(`ldap-attempt-${attempt}`);
       break;
     } catch (err) {
       stopMarker(`ldap-attempt-${attempt}`);
-      const tlsFailure = port === 636 && isTlsError(err, host);
+      const tlsFailure = useTls && isTlsError(err, host);
       console.log(`${tlsFailure ? 'Certificate/TLS error on attempt' : 'Connection attempt'} ${attempt}${tlsFailure ? '' : ' failed'}: ${describeError(err)}`);
 
       if (tlsFailure) {
@@ -760,7 +821,7 @@ async function runTest() {
   }
   stopMarker(connectMarkerName);
 
-  if (port === 636) {
+  if (useTls) {
     logTLSInfo(sock);
   }
 
@@ -831,11 +892,10 @@ async function runTest() {
       return;
     }
 
-    /* 3 ▸ Base-scope search on the bind DN (messageID 2) */
-    // The bind succeeded, so the bind DN exists. Request no attributes: the check needs only
-    // the result code, and the account's own entry can hold sensitive values.
+    /* 3 ▸ Base-scope search of the search base, the Root DSE by default (messageID 2) */
+    // Request no attributes: the check needs only the result code.
     const searchReq = ldapMessage(MESSAGE_ID.search, searchRequest({
-      baseObject: bindDN,
+      baseObject: baseDN,
       scope: SEARCH_SCOPE_BASE,
       sizeLimit: 1,
       timeLimit: 5, // seconds
@@ -844,7 +904,7 @@ async function runTest() {
     }));
 
     if (debugMode) {
-      console.log("Debug: Search strategy - base scope on bind DN, filter '(objectClass=*)', attributes '1.1'");
+      console.log(`Debug: Search - base scope on ${baseDN ? `"${baseDN}"` : 'the Root DSE'}, filter '(objectClass=*)', attributes '1.1'`);
     }
 
     metrics.searchStart = Date.now();
