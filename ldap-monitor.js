@@ -5,6 +5,7 @@
  * • Base-scope search of the Root DSE, or of a configured base DN
  * • Root DSE checks: LDAPv3 in supportedLDAPVersion, Active Directory isSynchronized and clock skew
  *   (currentTime), and optionally an expected naming context
+ * • LDAPS: a warning when the server certificate expires within ldapCertWarnDays
  * • Fails (throws) on any error. Latency is not judged here: each step is a ThousandEyes marker
  *   (ldap-tcp-connect or ldaps-ssl-handshake, ldap-bind, ldap-search), and alert rules on marker
  *   duration flag slow steps (terraform/marker_alerts.tf)
@@ -28,6 +29,9 @@
  *   ldapExpectedNamingContext →  a DN the Root DSE must list in namingContexts (Root DSE search only)
  *   ldapMaxClockSkewSeconds   →  most the Root DSE currentTime may differ from the agent clock
  *                                (default: 300; 0 turns the check off)
+ *   ldapCertWarnDays          →  warn when the LDAPS server certificate expires within this many
+ *                                days (default: 30; 0 turns the warning off). The warning is a log
+ *                                line and a note in the PASS summary; the test still passes
  *   ldapRequireEntry          →  'true' to fail a search that returns no entry. Off by default: some
  *                                servers answer a base DN the account cannot read with success and
  *                                no entry, rather than noSuchObject
@@ -60,6 +64,8 @@ const MAX_EMPTY_READS = 3; // consecutive empty reads treated as end of stream
 const MAX_DIAGNOSTIC_LENGTH = 200; // characters of server diagnosticMessage kept in errors
 const MAX_QUOTED_VALUES = 5; // server attribute values quoted in one message
 const DEFAULT_MAX_CLOCK_SKEW_S = 300; // Kerberos' default tolerance for clock skew
+const DEFAULT_CERT_WARN_DAYS = 30; // warn this long before the LDAPS server certificate expires
+const DAY_MS = 24 * 60 * 60 * 1000;
 
 /* ───────────── LDAP protocol codec (RFC 4511; BER per section 5.1) ───────────── */
 
@@ -519,6 +525,43 @@ function parseCaCertificates(value) {
   });
 }
 
+/**
+ * The server certificate of a TLS socket, or null. ThousandEyes does not document
+ * getPeerCertificate() for its sockets, so the method is feature-detected, and an error from it or
+ * a result that is not an object means the certificate is unknown.
+ * @returns {{ subject?: { CN?: unknown }, valid_to?: unknown } | null}
+ */
+const peerCertificateOf = (socket) => {
+  try {
+    const cert = socket && typeof socket.getPeerCertificate === 'function' ? socket.getPeerCertificate() : null;
+    return cert && typeof cert === 'object' ? cert : null;
+  } catch {
+    return null;
+  }
+};
+
+/** The certificate's subject CN, made safe for a log line; '' when it has none. */
+const certificateName = (cert) => {
+  const cn = cert && cert.subject && cert.subject.CN;
+  return typeof cn === 'string' || Array.isArray(cn) ? sanitizeServerText([].concat(cn).join(', ')) : '';
+};
+
+/**
+ * When the certificate expires, from its valid_to field in Node's format, such as
+ * "Oct 18 20:15:30 2026 GMT".
+ * @returns {{ daysLeft: number, text: string, expiresAt: string } | null}
+ *   null when valid_to is missing or not a date. daysLeft may be fractional or negative; text is,
+ *   for example, "expires in 3 days".
+ */
+const certificateExpiry = (cert, nowMs) => {
+  const expiresMs = cert && typeof cert.valid_to === 'string' ? Date.parse(cert.valid_to) : NaN;
+  if (!Number.isFinite(expiresMs)) return null;
+  const daysLeft = (expiresMs - nowMs) / DAY_MS;
+  const days = Math.floor(Math.abs(daysLeft));
+  const span = `${days} day${days === 1 ? '' : 's'}`;
+  return { daysLeft, text: daysLeft < 0 ? `expired ${span} ago` : `expires in ${span}`, expiresAt: new Date(expiresMs).toISOString() };
+};
+
 /** Start or stop a ThousandEyes marker; a marker error is logged, never fatal. */
 const startMarker = (name) => {
   try {
@@ -765,7 +808,8 @@ const getTestConfig = () => {
     bindOnlyMode: isEnabled(getCredential('ldapBindOnly')),
     expectedNamingContext: String(getCredential('ldapExpectedNamingContext') ?? '').trim(),
     maxClockSkewS: wholeNumberSetting('ldapMaxClockSkewSeconds', getCredential('ldapMaxClockSkewSeconds'), DEFAULT_MAX_CLOCK_SKEW_S),
-    requireEntry: isEnabled(getCredential('ldapRequireEntry'))
+    requireEntry: isEnabled(getCredential('ldapRequireEntry')),
+    certWarnDays: wholeNumberSetting('ldapCertWarnDays', getCredential('ldapCertWarnDays'), DEFAULT_CERT_WARN_DAYS)
   };
 };
 
@@ -786,7 +830,8 @@ async function runTest() {
     allowCleartext,
     expectedNamingContext,
     maxClockSkewS,
-    requireEntry
+    requireEntry,
+    certWarnDays
   } = cfg;
   
   // Helper function for secure credential access  
@@ -839,13 +884,12 @@ async function runTest() {
   /**
    * Log TLS connection information in a TypeScript-safe way
    * @param {object} socket - The socket object (may or may not have TLS methods)
+   * @param {object | null} cert - from peerCertificateOf(socket)
    */
-  const logTLSInfo = (socket) => {
+  const logTLSInfo = (socket, cert) => {
     try {
       let cipher = null;
-      let cert = null;
-      let cn = null;
-      
+
       // Safely attempt to get cipher information
       if (socket && 'getCipher' in socket) {
         try {
@@ -857,25 +901,9 @@ async function runTest() {
           // Ignore cipher access errors
         }
       }
-      
-      // Safely attempt to get certificate information
-      if (socket && 'getPeerCertificate' in socket) {
-        try {
-          const getCertMethod = socket.getPeerCertificate;
-          if (typeof getCertMethod === 'function') {
-            cert = getCertMethod.call(socket);
-            if (cert && cert.subject && cert.subject.CN) {
-              cn = cert.subject.CN;
-            }
-          }
-        } catch {
-          // Ignore certificate access errors
-        }
-      }
-      
+
       const cipherName = cipher && cipher.name ? cipher.name : 'unknown';
-      const commonName = cn || 'unknown';
-      console.log(`TLS cipher: ${cipherName}; peer CN: ${commonName}`);
+      console.log(`TLS cipher: ${cipherName}; peer CN: ${certificateName(cert) || 'unknown'}`);
       
     } catch {
       // If anything fails, just log basic TLS connection info
@@ -924,6 +952,9 @@ async function runTest() {
       }
     });
   };
+
+  // Notes for the PASS summary, such as a certificate that expires soon or the server version.
+  const facts = [];
 
   /* Performance metrics collector */
   const metrics = {
@@ -997,7 +1028,17 @@ async function runTest() {
   stopMarker(connectMarkerName);
 
   if (useTls) {
-    logTLSInfo(sock);
+    const cert = peerCertificateOf(sock);
+    logTLSInfo(sock, cert);
+    const expiry = certificateExpiry(cert, Date.now());
+    if (debugMode) {
+      console.log(`Debug: Server certificate valid until ${expiry ? expiry.expiresAt : 'unknown (getPeerCertificate() gave no valid_to)'}`);
+    }
+    if (expiry && certWarnDays > 0 && expiry.daysLeft < certWarnDays) {
+      const name = certificateName(cert);
+      console.log(`Warning: the server certificate${name ? ` (CN ${name})` : ''} ${expiry.text}, on ${expiry.expiresAt}; ldapCertWarnDays is ${certWarnDays}`);
+      facts.push(`certificate ${expiry.text}`);
+    }
   }
 
   // The time budget bounds every wait; the socket idle timeout, where supported, is a backstop.
@@ -1058,7 +1099,7 @@ async function runTest() {
     if (bindOnlyMode) {
       const totalTime = metrics.bindEnd - metrics.connectionStart;
       const connectionTime = metrics.connectionEnd - metrics.connectionStart;
-      console.log(`LDAP Monitor: PASS (Bind-Only) - Total ${totalTime}ms (connect: ${connectionTime}ms, bind: ${bindRTT}ms)`);
+      console.log(`LDAP Monitor: PASS (Bind-Only) - Total ${totalTime}ms (connect: ${connectionTime}ms, bind: ${bindRTT}ms)${facts.map((fact) => `; ${fact}`).join('')}`);
       return;
     }
 
@@ -1123,16 +1164,15 @@ async function runTest() {
       throw failure('SEARCH', `no entry returned for ${baseDN ? `"${baseDN}"` : 'the Root DSE'}; the base DN may not exist, or the account may not be allowed to read it (ldapRequireEntry is set)`);
     }
 
-    let facts = [];
     if (!baseDN) {
       if (debugMode) {
         for (const [type, values] of rootDse || []) console.log(`Debug: Root DSE ${type}: ${quoteValues(values)}`);
       }
-      facts = checkRootDse(rootDse, {
+      facts.push(...checkRootDse(rootDse, {
         expectedNamingContext,
         maxClockSkewS,
         agentTimeMs: (metrics.searchStart + metrics.searchEnd) / 2
-      });
+      }));
     }
 
     // Final performance summary (visible in GUI)

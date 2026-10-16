@@ -21,7 +21,7 @@ const entry = (size = 300) => ldap.searchEntry(2, DN, { cn: ['monitor'], descrip
  * Start a fake server for `scenario`, run the script against it once, then stop the server.
  * `credentials` are merged over a working default set; `settings` feed test.getSettings().
  */
-async function probe(scenario, { credentials = {}, settings, tls, routes, timeLimitMs, enforceSocketTimeout, stallCleanup } = {}) {
+async function probe(scenario, { credentials = {}, settings, tls, routes, timeLimitMs, enforceSocketTimeout, stallCleanup, peerCertificate } = {}) {
   const server = await startFakeLdap({ ...scenario, tls });
   const port = tls ? 636 : 389;
   try {
@@ -33,6 +33,7 @@ async function probe(scenario, { credentials = {}, settings, tls, routes, timeLi
       settings,
       enforceSocketTimeout,
       stallCleanup,
+      peerCertificate,
       routes: { [`${HOST}:${port}`]: `127.0.0.1:${server.port}`, ...routes?.(server.port) },
     }, { timeLimitMs });
     return { ...result, requests: server.requests };
@@ -785,6 +786,45 @@ describe('LDAPS', () => {
     const flattened = fixture.caPem.replace(/\n/g, ' ');
     const result = await tlsProbe({ bind: bindOk }, { credentials: { ldapBindOnly: 'true', ldapCaBase64: flattened } });
     assert.equal(result.verdict, 'pass', result.failure ?? '');
+  });
+
+  describe('certificate expiry warning', () => {
+    // The fixture's server certificate is valid for 2 days, so it is inside the default 30 days.
+    const trusted = (credentials = {}) => ({ ldapBindOnly: 'true', ldapCaBase64: caBase64(), ...credentials });
+
+    it('warns when the certificate expires within ldapCertWarnDays (default 30)', { skip: skip() }, async () => {
+      const result = await tlsProbe({ bind: bindOk }, { credentials: trusted() });
+      assert.equal(result.verdict, 'pass', result.failure ?? '');
+      assert.match(result.stdout, /^Warning: the server certificate \(CN ldap\.test\) expires in 1 day, on \d{4}-\d\d-\d\dT[\d:.]+Z; ldapCertWarnDays is 30$/m);
+      assert.match(result.stdout, /LDAP Monitor: PASS \(Bind-Only\) - .*; certificate expires in 1 day$/m);
+    });
+
+    it('does not warn when the certificate outlives ldapCertWarnDays, or when it is 0', { skip: skip() }, async () => {
+      for (const days of ['1', '0']) {
+        const result = await tlsProbe({ bind: bindOk }, { credentials: trusted({ ldapCertWarnDays: days }) });
+        assert.equal(result.verdict, 'pass', result.failure ?? '');
+        assert.doesNotMatch(result.stdout, /certificate expires/);
+      }
+    });
+
+    for (const [what, peerCertificate] of [
+      ['the runtime has no getPeerCertificate()', 'absent'],
+      ['getPeerCertificate() throws', 'throws'],
+      ['valid_to is missing', { subject: { CN: 'ldap.test' } }],
+      ['valid_to is not a date', { subject: { CN: 'ldap.test' }, valid_to: 'soon' }],
+    ]) {
+      it(`skips the check quietly when ${what}`, { skip: skip() }, async () => {
+        const result = await tlsProbe({ bind: bindOk }, { credentials: trusted(), peerCertificate });
+        assert.equal(result.verdict, 'pass', result.failure ?? '');
+        assert.doesNotMatch(result.stdout, /expires|Warning/);
+        assert.equal(result.stderr, '');
+      });
+    }
+
+    it('rejects an ldapCertWarnDays that is not a whole number', { skip: skip() }, async () => {
+      const result = await tlsProbe({ bind: bindOk }, { credentials: trusted({ ldapCertWarnDays: '-1' }) });
+      assert.match(result.failure, /^CONFIG: ldapCertWarnDays must be a whole number/);
+    });
   });
 
   it('reports a CA credential without a certificate as a configuration error, before connecting', { skip: skip() }, async () => {

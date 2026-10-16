@@ -14,12 +14,16 @@
  *   - credentials.get() throws for a credential not associated with the test.
  *   - socket.setTimeout() is recorded but not enforced unless `enforceSocketTimeout` is set,
  *     in which case it behaves like Node's idle timeout and rejects the pending read().
+ *   - A TLS socket has getCipher() and getPeerCertificate() as in Node's tls module. Neither is
+ *     documented for ThousandEyes, so `peerCertificate` can take getPeerCertificate() away.
  *
  * Configured through the TE_STUB_CONFIG environment variable (JSON):
- *   { credentials, settings, routes, enforceSocketTimeout, stallCleanup }
+ *   { credentials, settings, routes, enforceSocketTimeout, stallCleanup, peerCertificate }
  * `routes` maps "host:port" as the script sees it to "127.0.0.1:port" on the test machine,
  * or to "hang" for a connect that never completes. Unrouted targets are refused.
  * `stallCleanup` makes writing an UnbindRequest and end() never complete.
+ * `peerCertificate` changes getPeerCertificate() on TLS sockets: 'absent' leaves it out,
+ * 'throws' makes it throw, and an object is returned in place of the real certificate.
  * Every observable call is appended as a JSON line to the file named by TE_STUB_TRACE.
  */
 import { appendFileSync } from 'node:fs';
@@ -104,7 +108,14 @@ function wrapSocket(sock) {
   };
   if (typeof sock.getCipher === 'function') {
     api.getCipher = () => sock.getCipher();
-    api.getPeerCertificate = () => sock.getPeerCertificate();
+    const { peerCertificate } = config;
+    if (peerCertificate === 'throws') {
+      api.getPeerCertificate = () => { throw new Error('getPeerCertificate is not available'); };
+    } else if (peerCertificate && typeof peerCertificate === 'object') {
+      api.getPeerCertificate = () => peerCertificate;
+    } else if (peerCertificate !== 'absent') {
+      api.getPeerCertificate = () => sock.getPeerCertificate();
+    }
   }
   return api;
 }

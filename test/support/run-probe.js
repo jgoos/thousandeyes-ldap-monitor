@@ -19,7 +19,8 @@ const registerPath = fileURLToPath(new URL('./register-stub.js', import.meta.url
  */
 
 /**
- * @param {object} config  TE_STUB_CONFIG: { credentials, settings, routes, enforceSocketTimeout }
+ * @param {object} config  TE_STUB_CONFIG: { credentials, settings, routes, enforceSocketTimeout,
+ *   stallCleanup, peerCertificate }; see thousandeyes-stub.js
  * @param {{ timeLimitMs?: number }} [options]  kill the run after this long, like the
  *   ThousandEyes transaction time limit
  * @returns {Promise<ProbeResult>}
