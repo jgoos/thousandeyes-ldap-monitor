@@ -22,6 +22,15 @@
  *   ldapAllowCleartext →  'true' to allow sending the password without TLS (RFC 4513 5.1.3)
  *   ldapBindOnly       →  'true' to skip the search
  *   ldapDebugMode      →  'true' for verbose debugging (default: false)
+ *
+ * A failure is one line that starts with its class:
+ *   CONFIG: …                       missing or invalid configuration; nothing was sent
+ *   TCP: …                          the connection could not be opened
+ *   TLS: …                          the TLS handshake or certificate verification failed
+ *   TIMEOUT: …                      a connect or a response took longer than the time limit allows
+ *   BIND: …, SEARCH: …              a protocol error during that operation
+ *   BIND rc=49 invalidCredentials: …, SEARCH rc=32 noSuchObject: …
+ *                                   the server returned that LDAP result code
  */
 
 import { net, credentials, test, markers } from 'thousandeyes';
@@ -111,16 +120,15 @@ const LDAP_RESULT_CODES = {
 };
 
 /**
- * Human-readable result code: "name (code/0xNN): description".
+ * Human-readable result code: "rc=<code> <name>: <description>".
  * @param {number} resultCode
  * @returns {string}
  */
 const getLdapErrorMessage = (resultCode) => {
-  const hex = resultCode.toString(16).padStart(2, '0');
   const info = LDAP_RESULT_CODES[resultCode];
   return info
-    ? `${info.name} (${resultCode}/0x${hex}): ${info.description}`
-    : `Unknown LDAP result code ${resultCode} (0x${hex})`;
+    ? `rc=${resultCode} ${info.name}: ${info.description}`
+    : `rc=${resultCode}: Unknown LDAP result code (0x${resultCode.toString(16).padStart(2, '0')})`;
 };
 
 /**
@@ -347,17 +355,22 @@ async function nextResponse(nextMessage, messageId) {
   if (message.messageId === 0 && message.opTag === LDAP_TAG.extendedResponse) {
     const result = decodeLdapResult(message);
     const kind = result.responseName === NOTICE_OF_DISCONNECTION_OID ? 'a Notice of Disconnection' : 'an unsolicited notification';
-    throw new Error(`server sent ${kind}: ${formatLdapResult(result)}`);
+    throw new Error(`server sent ${kind}, ${formatLdapResult(result)}`);
   }
   throw new Error(`unexpected message ID ${message.messageId} (expected ${messageId})`);
 }
 
-/** Run `step`, prefixing any error with "<phase> failed: ". */
+/**
+ * Run `step`, prefixing any error with its failure class: "<PHASE>: ", or "TIMEOUT: <phase>: " for
+ * a response that did not arrive in time.
+ */
 async function inPhase(phase, step) {
   try {
     return await step();
   } catch (err) {
-    throw new Error(`${phase} failed: ${err && err.message || 'Unknown error'}`, { cause: err });
+    const message = err && err.message || 'Unknown error';
+    const timedOut = err && err.code === 'ETIMEDOUT';
+    throw failure(timedOut ? 'TIMEOUT' : phase, timedOut ? `${phase.toLowerCase()}: ${message}` : message, err);
   }
 }
 
@@ -416,6 +429,18 @@ const describeError = (err) => {
 };
 
 /**
+ * An error whose one-line message starts with its failure class (see the header), so an alert or
+ * log line says what kind of failure it is before the details.
+ * @param {string} failureClass - CONFIG, TCP, TLS, TIMEOUT, BIND or SEARCH
+ * @param {string} message
+ * @param {unknown} [cause]
+ */
+const failure = (failureClass, message, cause) =>
+  new Error(`${failureClass}: ${message}`, cause === undefined ? undefined : { cause });
+
+const configError = (message) => failure('CONFIG', message);
+
+/**
  * Whether a connect error came from TLS rather than from the network. The error code decides when
  * there is one; otherwise the message is checked for TLS keywords with the host name removed, so
  * a host such as "certificate-gw.example.com" does not make a network error look like TLS.
@@ -448,7 +473,7 @@ function parseCaCertificates(value) {
   const pem = text.includes('-----BEGIN') ? text : Buffer.from(text, 'base64').toString('utf8');
   const blocks = pem.match(/-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICATE-----/g);
   if (!blocks) {
-    throw new Error('Configuration error: ldapCaBase64 holds no certificate; expected PEM text ("-----BEGIN CERTIFICATE-----"), as-is or base64-encoded');
+    throw configError('ldapCaBase64 holds no certificate; expected PEM text ("-----BEGIN CERTIFICATE-----"), as-is or base64-encoded');
   }
   return blocks.map((block) => {
     const body = block.replace(/-----(BEGIN|END) CERTIFICATE-----/g, '').replace(/\s+/g, '');
@@ -473,8 +498,6 @@ const stopMarker = (name) => {
 };
 
 /* ───────────── Target configuration ───────────── */
-
-const configError = (message) => new Error(`Configuration error: ${message}`);
 
 /** Credential flag: 'true', '1' or 'yes', in any letter case. */
 const isEnabled = (value) => ['true', '1', 'yes'].includes(String(value || '').trim().toLowerCase());
@@ -543,7 +566,7 @@ function resolveTarget({ testUrl, ldapHost, ldapPort, ldapBaseDN }) {
   }
   const port = parseInt(ldapPort, 10) || 636;
   if (port !== 389 && port !== 636) {
-    throw new Error(`Invalid port ${port}: Must be 389 (LDAP) or 636 (LDAPS) in the ldapPort credential; use an ldap:// or ldaps:// test URL for other ports`);
+    throw configError(`invalid port ${port} in the ldapPort credential: must be 389 (LDAP) or 636 (LDAPS); use an ldap:// or ldaps:// test URL for other ports`);
   }
   return { host, port, tls: port === 636, baseDN: ldapBaseDN, source: 'ldapHost credential' };
 }
@@ -654,7 +677,7 @@ async function runTest() {
   
   /* Input validation */
   if (!bindDN || !bindPwd) {
-    throw new Error('Missing credentials: Ensure ldapMonUser and ldapMonPass are configured');
+    throw configError('missing credentials: ensure ldapMonUser and ldapMonPass are configured');
   }
 
   const { host, port, tls: useTls, baseDN, source } = resolveTarget(cfg);
@@ -827,11 +850,12 @@ async function runTest() {
       if (tlsFailure) {
         stopMarker(connectMarkerName);
         const hint = caBase64 ? '' : '. If the server certificate comes from a private CA, provide it in the ldapCaBase64 credential';
-        throw new Error(`TLS handshake with ${hostPort(host, port)} failed: ${describeError(err)}${hint}`, { cause: err });
+        throw failure('TLS', `handshake with ${hostPort(host, port)} failed: ${describeError(err)}${hint}`, err);
       }
       if (attempt > maxRetries || remainingMs() <= retryDelayMs) {
         stopMarker(connectMarkerName);
-        throw new Error(`Connection failed after ${attempt} attempt${attempt === 1 ? '' : 's'}: ${describeError(err)}`, { cause: err });
+        if (err && err.code === 'ETIMEDOUT') throw failure('TIMEOUT', `${err.message} (attempt ${attempt})`, err);
+        throw failure('TCP', `connection to ${hostPort(host, port)} failed after ${attempt} attempt${attempt === 1 ? '' : 's'}: ${describeError(err)}`, err);
       }
       await createDelay(retryDelayMs);
     }
@@ -867,16 +891,15 @@ async function runTest() {
     metrics.bindStart = Date.now();
     markers.start('ldap-bind');
     try {
-      // Defensive check for socket methods
-      if (!sock || typeof sock.writeAll !== 'function' || typeof sock.read !== 'function') {
-        throw new Error('Socket does not have required writeAll/read methods');
-      }
-
       if (debugMode) {
         console.log('Debug: Sending bind request');
       }
-      await sock.writeAll(ldapMessage(MESSAGE_ID.bind, bindRequest(bindDN, bindPwd)));
-      const bindResult = await inPhase('Bind', async () => {
+      const bindResult = await inPhase('BIND', async () => {
+        // Defensive check for socket methods
+        if (!sock || typeof sock.writeAll !== 'function' || typeof sock.read !== 'function') {
+          throw new Error('Socket does not have required writeAll/read methods');
+        }
+        await sock.writeAll(ldapMessage(MESSAGE_ID.bind, bindRequest(bindDN, bindPwd)));
         const response = await nextResponse(nextMessage, MESSAGE_ID.bind);
         if (response.opTag !== LDAP_TAG.bindResponse) {
           throw new Error(`expected a BindResponse, got tag 0x${response.opTag.toString(16)}`);
@@ -891,7 +914,7 @@ async function runTest() {
       }
 
       if (bindResult.resultCode !== 0) {
-        throw new Error(`Authentication failed: ${formatLdapResult(bindResult)}`);
+        throw new Error(`BIND ${formatLdapResult(bindResult)}`);
       }
 
       if (bindRTT > slowMs) {
@@ -929,9 +952,9 @@ async function runTest() {
     let searchResult;
     let entries = 0;
     try {
-      await sock.writeAll(searchReq);
       // Entries, references and intermediate responses may precede SearchResultDone (RFC 4511 4.5.2).
-      searchResult = await inPhase('Search', async () => {
+      searchResult = await inPhase('SEARCH', async () => {
+        await sock.writeAll(searchReq);
         for (;;) {
           const response = await nextResponse(nextMessage, MESSAGE_ID.search);
           switch (response.opTag) {
@@ -959,7 +982,7 @@ async function runTest() {
     }
 
     if (searchResult.resultCode !== 0) {
-      throw new Error(`Search failed: ${formatLdapResult(searchResult)}`);
+      throw new Error(`SEARCH ${formatLdapResult(searchResult)}`);
     }
 
     if (searchRTT > slowMs) {
