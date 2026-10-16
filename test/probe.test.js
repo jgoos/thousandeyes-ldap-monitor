@@ -205,10 +205,20 @@ describe('search', () => {
     assert.match(result.failure, /disconnect|unavailable/i);
   });
 
-  it('fails a search slower than slowMs on every response path (B6)', async () => {
-    const result = await probe({ bind: bindOk, search: () => [{ waitMs: 400 }, entry(), ldap.searchDone(2, 0)] });
-    assert.equal(result.verdict, 'fail');
-    assert.match(result.failure, /Slow search/);
+  it('passes a slow bind and search; latency alerts are rules on the markers instead (B25)', async () => {
+    const result = await probe({
+      bind: () => [{ waitMs: 400 }, ...bindOk()],
+      search: () => [{ waitMs: 400 }, entry(), ldap.searchDone(2, 0)],
+    });
+    assert.equal(result.verdict, 'pass', result.failure ?? '');
+    assert.doesNotMatch(result.stdout, /slow/i);
+  });
+
+  // terraform/marker_alerts.tf alerts on these marker names; keep the two in step.
+  it('records the markers the Terraform latency alert rules name (B25)', async () => {
+    const result = await probe({ bind: bindOk, search: () => [ldap.searchDone(2, 0)] });
+    assert.deepEqual(eventsOf(result, 'marker.stop').map((e) => e.name), ['ldap-attempt-1', 'ldap-tcp-connect', 'ldap-bind', 'ldap-search']);
+    assert.equal(eventsOf(result, 'marker.error').length, 0);
   });
 
   it('encodes scope and derefAliases as ENUMERATED (RFC 4511 4.5.1) (B14)', async () => {

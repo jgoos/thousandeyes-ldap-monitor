@@ -3,7 +3,9 @@
  *
  * • Authenticated LDAPv3 simple bind
  * • Base-scope search of the Root DSE, or of a configured base DN
- * • Fails (throws) on error or if either round-trip exceeds `slowMs`
+ * • Fails (throws) on any error. Latency is not judged here: each step is a ThousandEyes marker
+ *   (ldap-tcp-connect or ldaps-ssl-handshake, ldap-bind, ldap-search), and alert rules on marker
+ *   duration flag slow steps (terraform/marker_alerts.tf)
  *
  * Target: the test URL, as an RFC 4516 LDAP URL
  *   ldaps://ldap.example.com            LDAPS on port 636, search the Root DSE
@@ -628,7 +630,6 @@ const getTestConfig = () => {
     ldapBaseDN: typeof ldapBaseDN === 'string' ? ldapBaseDN.trim() : '',
     allowCleartext: isEnabled(getCredential('ldapAllowCleartext')),
     timeoutMs: testTimeLimitMs(testTimeout),
-    slowMs: 300,
     retryDelayMs: 100,
     maxRetries: 2,
     tlsMinVersion: 'TLSv1.2',
@@ -646,7 +647,6 @@ async function runTest() {
   /* ─────────── dynamic configuration loaded ─────────── */
   const {
     timeoutMs,
-    slowMs,
     retryDelayMs,
     maxRetries,
     tlsMinVersion,
@@ -691,10 +691,6 @@ async function runTest() {
       throw configError(`refusing to send the bind password to ${hostPort(host, port)} without TLS (RFC 4513 section 5.1.3). Use ldaps://, or set the ldapAllowCleartext credential to true to accept the risk`);
     }
     console.log(`Warning: sending the bind password to ${hostPort(host, port)} without TLS (ldapAllowCleartext is set)`);
-  }
-
-  if (slowMs <= 0) {
-    throw new Error('Invalid slowMs threshold: must be greater than 0');
   }
 
   const deadline = probeStart + probeBudgetMs(timeoutMs);
@@ -916,10 +912,6 @@ async function runTest() {
       if (bindResult.resultCode !== 0) {
         throw new Error(`BIND ${formatLdapResult(bindResult)}`);
       }
-
-      if (bindRTT > slowMs) {
-        throw new Error(`Slow bind: ${bindRTT} ms (>${slowMs}ms threshold)`);
-      }
     } finally {
       markers.stop('ldap-bind');
     }
@@ -983,10 +975,6 @@ async function runTest() {
 
     if (searchResult.resultCode !== 0) {
       throw new Error(`SEARCH ${formatLdapResult(searchResult)}`);
-    }
-
-    if (searchRTT > slowMs) {
-      throw new Error(`Slow search: ${searchRTT} ms (>${slowMs}ms threshold)`);
     }
 
     // Final performance summary (visible in GUI)

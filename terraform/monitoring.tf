@@ -45,7 +45,7 @@ resource "thousandeyes_web_transaction" "ldap_test" {
   time_limit                = var.time_limit
   flag_collect_console_logs = true
   alerts_enabled            = true
-  alert_rules               = [thousandeyes_alert_rule.ldap_alert_rule.rule_id]
+  alert_rules               = concat([thousandeyes_alert_rule.ldap_alert_rule.rule_id], local.marker_alert_rule_ids)
 
   lifecycle {
     precondition {
