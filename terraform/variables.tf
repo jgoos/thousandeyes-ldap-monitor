@@ -4,14 +4,32 @@ variable "te_api_token" {
   sensitive   = true
 }
 
+variable "account_group_id" {
+  description = <<-EOT
+    ID of the account group to manage tests and alert rules in, and where monitoring_user holds
+    its role. Null (the default) uses the TE_AID environment variable, or else the token owner's
+    default account group. Set it to the group where the tests already live: in another group the
+    provider cannot find them, plans to create them again there, and leaves the old ones running.
+    Required with monitoring_user.
+  EOT
+  type        = string
+  default     = null
+}
+
+variable "te_user_email" {
+  description = "Deprecated, ignored; removed in a future release"
+  type        = string
+  default     = null
+}
+
 variable "monitoring_user" {
   description = <<-EOT
-    Optional user that Terraform creates and gives the Monitoring Administrator role in the
-    ThousandEyes Monitoring Config account group. Null (the default) creates no user, and no role
-    unless create_monitoring_role is true.
+    Optional user that Terraform creates and gives the Monitoring Administrator role in
+    account_group_id, which is also its login account group. Null (the default) creates no user,
+    and no role unless create_monitoring_role is true.
     - email: a dedicated account, never the API token owner's or a person's. Terraform owns the
       user: the API replaces a user's role assignments as a whole, so this becomes the user's
-      only one, and destroy deletes the user.
+      only one. prevent_destroy keeps Terraform from deleting the user.
     - name: display name; defaults to the email address.
   EOT
   type = object({
@@ -30,8 +48,8 @@ variable "create_monitoring_role" {
   description = <<-EOT
     Whether to create the Monitoring Administrator role. Null (the default) creates it only with a
     monitoring_user. true always creates it: set this when upgrading a configuration whose role
-    already exists, or Terraform deletes that role. false never creates it and cannot be combined
-    with monitoring_user.
+    already exists (otherwise prevent_destroy stops the plan). false never creates it and cannot
+    be combined with monitoring_user.
   EOT
   type        = bool
   default     = null

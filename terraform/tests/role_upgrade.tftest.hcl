@@ -1,6 +1,10 @@
 # Upgrading a configuration whose role was created by an earlier version (no count): with
-# create_monitoring_role = true the role stays, at index 0. Runs share state through state_key,
-# which needs Terraform 1.11 or later.
+# create_monitoring_role = true the role stays, moved to index 0 by Terraform itself (no moved
+# block). Runs share state through state_key, which needs Terraform 1.11 or later.
+#
+# With the defaults the plan would delete the role, and prevent_destroy stops it with "Instance
+# cannot be destroyed". expect_failures cannot catch that error (it is not a custom condition), so
+# no run covers it.
 mock_provider "thousandeyes" {
   mock_resource "thousandeyes_role" {
     defaults = {

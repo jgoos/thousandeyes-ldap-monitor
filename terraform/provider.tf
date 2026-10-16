@@ -1,5 +1,6 @@
 terraform {
-  # 1.7 or later: terraform test uses mock_provider (tests/monitoring.tftest.hcl).
+  # 1.7 or later. terraform test needs 1.11 or later (mock_provider, and state_key in
+  # tests/role_upgrade.tftest.hcl).
   required_version = ">= 1.7.0"
 
   required_providers {
@@ -14,4 +15,6 @@ terraform {
 
 provider "thousandeyes" {
   token = var.te_api_token
+  # Null falls back to the TE_AID environment variable, then to the token owner's default group.
+  account_group_id = var.account_group_id
 }

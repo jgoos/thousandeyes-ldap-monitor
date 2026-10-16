@@ -17,6 +17,8 @@ variables {
   te_api_token   = "mock-token"
   agent_ids      = ["1001"]
   credential_ids = ["2001", "2002"]
+  # The account group the tests live in; the module-created group gets aid 7001 from the mock.
+  account_group_id = "6001"
 }
 
 run "no_monitoring_user_creates_no_role_or_user" {
@@ -68,6 +70,17 @@ run "create_monitoring_role_false_rejects_a_monitoring_user" {
   variables {
     create_monitoring_role = false
     monitoring_user        = { email = "svc-ldap-monitor@example.com" }
+  }
+
+  expect_failures = [thousandeyes_user.monitoring]
+}
+
+run "monitoring_user_requires_account_group_id" {
+  command = plan
+
+  variables {
+    account_group_id = null
+    monitoring_user  = { email = "svc-ldap-monitor@example.com" }
   }
 
   expect_failures = [thousandeyes_user.monitoring]
@@ -132,7 +145,7 @@ run "default_role_is_least_privilege" {
   }
 }
 
-run "monitoring_user_holds_the_role_in_the_monitoring_account_group" {
+run "monitoring_user_holds_the_role_in_the_tests_account_group" {
   command = apply
 
   variables {
@@ -144,18 +157,18 @@ run "monitoring_user_holds_the_role_in_the_monitoring_account_group" {
     error_message = "The user should get the configured email and name."
   }
   assert {
-    condition     = thousandeyes_user.monitoring[0].login_account_group_id == "7001"
-    error_message = "The user should log in to the monitoring account group."
+    condition     = thousandeyes_user.monitoring[0].login_account_group_id == "6001"
+    error_message = "The user should log in to account_group_id, where the tests live."
   }
   assert {
     condition = [for assignment in thousandeyes_user.monitoring[0].account_group_roles : {
       account_group_id = assignment.account_group_id
       role_ids         = assignment.role_ids
       }] == [{
-      account_group_id = "7001"
+      account_group_id = "6001"
       role_ids         = toset(["8001"])
     }]
-    error_message = "The user's only assignment should be the role in the monitoring account group."
+    error_message = "The user's only assignment should be the role in account_group_id, not in the module-created group."
   }
   assert {
     condition     = output.monitoring_role_id == "8001" && output.monitoring_user_id == thousandeyes_user.monitoring[0].uid
