@@ -9,7 +9,7 @@ Each test's URL is an LDAP URL (RFC 4516), such as `ldaps://dc1.example.com:636/
 - [Terraform](https://www.terraform.io/) 1.7 or later. `terraform test` needs 1.11 or later (provider mocking, and `state_key` in the upgrade tests).
 - Access to a ThousandEyes account.
 - An API token whose user holds, in the account group the tests live in, the seven test, alert rule and agent permissions listed under [Token](#token). The defaults need no `Organization Admin`. `monitoring_user` or `create_monitoring_role = true` does, for every plan and apply (see [Monitoring user and role](#monitoring-user-and-role)).
-- The script's credentials, created in the ThousandEyes UI or API (`Settings ▸ Secure Credentials`): `ldapMonUser`, `ldapMonPass`, and any optional ones you use (`ldapCaBase64`, `ldapAllowCleartext`, ...). Terraform attaches them to the tests by ID only, so their values never enter Terraform state. List their IDs with `GET /v7/credentials`.
+- The script's credentials, created in the ThousandEyes UI (`Network & App Synthetics ▸ Test Settings ▸ Credentials Repository ▸ Add New Credential`) or API: `ldapMonUser`, `ldapMonPass`, and any optional ones you use (`ldapCaBase64`, `ldapAllowCleartext`, ...). Terraform attaches them to the tests by ID only, so their values never enter Terraform state. List their IDs with `GET /v7/credentials`.
 
 ## Configuration
 
