@@ -468,14 +468,45 @@ describe('running an instant test against a fake API', () => {
     assert.equal(api.count(CREATE), 1);
   });
 
-  it('stops on an authentication error without printing the token', async () => {
+  it('stops on an authentication error, quoting the v7 401 body (error, error_description)', async () => {
     const { code, output, api } = await run({
-      routes: { [CREATE]: { status: 401, body: { title: 'Unauthorized', detail: 'Invalid token' } } },
+      routes: { [CREATE]: { status: 401, body: { error: 'invalid_token', error_description: 'Invalid access token' } } },
     });
     assert.equal(code, EXIT.error);
-    assert.match(output, /error: POST \/tests\/web-transactions\/instant returned HTTP 401: Unauthorized: Invalid token/);
+    assert.match(output, /^error: POST \/tests\/web-transactions\/instant returned HTTP 401: invalid_token: Invalid access token$/m);
     assert.equal(api.count(CREATE), 1);
     assert.equal(output.includes(TOKEN), false);
+  });
+
+  it('redacts the token, neutralises and caps an error body that echoes it', async () => {
+    const { code, output } = await run({
+      routes: { [CREATE]: { status: 401, body: { error: 'invalid_token', error_description: `token ${TOKEN} expired\n##[error]x ${'y'.repeat(600)}` } } },
+    });
+    assert.equal(code, EXIT.error);
+    assert.equal(output.includes(TOKEN), false);
+    const line = output.split('\n').find((l) => l.startsWith('error: POST'));
+    assert.match(line, /HTTP 401: invalid_token: token <redacted> expired # #\[error\]x y+\.\.\.$/);
+    assert.ok(line.length < 700, `capped, got ${line.length}`);
+  });
+
+  it('redacts the token before capping, so no part of it survives at the cut', async () => {
+    // "invalid_token: " is 15 characters, so the token starts 10 characters before the 500 cap.
+    const { output } = await run({
+      routes: { [CREATE]: { status: 401, body: { error: 'invalid_token', error_description: `${'x'.repeat(475)}${TOKEN}tail` } } },
+    });
+    assert.equal(output.includes(TOKEN.slice(0, 8)), false);
+    assert.match(output, /x<redacted>\.\.\.$/m);
+  });
+
+  it('quotes a problem+json body: title, detail and errors', async () => {
+    const { code, output } = await run({
+      routes: { [CREATE]: { status: 400, body: {
+        type: 'about:blank', title: 'Request validation failed', status: 400, detail: 'Your request object contains invalid fields.',
+        errors: [{ code: 'X-1', field: 'url', message: 'url is invalid' }],
+      } } },
+    });
+    assert.equal(code, EXIT.error);
+    assert.match(output, /HTTP 400: Request validation failed: Your request object contains invalid fields\. \[\{"code":"X-1","field":"url","message":"url is invalid"\}\]/);
   });
 
   it('reports a request that cannot be sent without quoting the error, which may hold the token', async () => {

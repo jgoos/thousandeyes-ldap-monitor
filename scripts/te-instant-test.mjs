@@ -271,16 +271,21 @@ export function rateLimitDelayMs(headers, nowMs, fallbackMs) {
   return Math.min(Math.max(Math.max(...resets) - nowMs, 1000), MAX_RATE_LIMIT_WAIT_MS);
 }
 
-/** Short, single-line reason from an error body (application/problem+json or other). */
-function problemText(data, text) {
+/**
+ * Short, single-line, neutralised reason from an error body: application/problem+json (`title`,
+ * `detail`, `errors`), the v7 401 body (`error`, `error_description`, e.g. "invalid_token:
+ * Invalid access token"), or the raw text. `redact` runs before the length cap, so a token
+ * cannot survive cut in half.
+ */
+function problemText(data, text, redact) {
   let reason = '';
   if (data && typeof data === 'object') {
-    reason = [data.title, data.detail, data.message, data.errorMessage]
+    reason = [data.title, data.detail, data.message, data.errorMessage, data.error, data.error_description]
       .filter((part) => typeof part === 'string' && part).join(': ');
     if (Array.isArray(data.errors) && data.errors.length) reason += ` ${JSON.stringify(data.errors)}`;
   }
   if (!reason) reason = text;
-  reason = oneLine(reason).trim();
+  reason = oneLine(redact(reason)).trim();
   return reason ? `: ${reason.length > 500 ? `${reason.slice(0, 500)}...` : reason}` : '';
 }
 
@@ -336,7 +341,7 @@ export function createClient({ baseUrl, token, accountGroupId, fetchImpl, now, p
     }
     if (!response.ok) {
       const status = response.status;
-      throw new ApiError(redact(`${label} returned HTTP ${status}${problemText(data, text)}`), {
+      throw new ApiError(redact(`${label} returned HTTP ${status}${problemText(data, text, redact)}`), {
         status,
         retryable: status === 429 || (method === 'GET' && status >= 500),
         retryAfterMs: status === 429 ? rateLimitDelayMs(response.headers, now(), pollIntervalMs) : undefined,
