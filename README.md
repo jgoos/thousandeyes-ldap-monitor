@@ -150,8 +150,8 @@ Terraform always builds a URL with a `/` path, so set `base_dn` there; an `ldapB
 | `ldapBaseDN` | Root DSE | Search base when the test URL has no `/` path |
 | `ldapAllowCleartext` | off | Allow the bind over plain LDAP. Without it, a plain-LDAP target fails with a `CONFIG` error before connecting (RFC 4513 section 5.1.3) |
 | `ldapBindOnly` | off | Skip the search; the run passes after a successful bind |
-| `ldapExpectedNamingContext` | (unset) | A DN the Root DSE must list in `namingContexts`, compared ignoring letter case and spaces around `,`, `=` and `+`. Needs the Root DSE search: with a base DN or `ldapBindOnly`, the run fails with a `CONFIG` error rather than skipping the check |
-| `ldapMaxClockSkewSeconds` | `300` | Most the Root DSE `currentTime` may differ from the agent clock (Kerberos' default tolerance). `0` turns the check off |
+| `ldapExpectedNamingContext` | (unset) | A DN the Root DSE must list in `namingContexts`, compared ignoring letter case and spaces around `,`, `=` and `+`; an escaped character such as `\,` stays part of the value, and a DN longer than 4096 characters matches nothing. Needs the Root DSE search: with a base DN or `ldapBindOnly`, the run fails with a `CONFIG` error rather than skipping the check |
+| `ldapMaxClockSkewSeconds` | `300` | Most the Root DSE `currentTime` may differ from the agent clock (Kerberos' default tolerance). `0` turns the check off. A `currentTime` that is not a GeneralizedTime is not checked; debug mode logs that |
 | `ldapCertWarnDays` | `30` | Log a warning when the LDAPS server certificate expires within this many days. `0` turns the warning off. The run still passes |
 | `ldapRequireEntry` | off | Fail a search that returns no entry. See below |
 | `ldapDebugMode` | off | Verbose output. See [Debug Mode](#debug-mode) |
@@ -236,6 +236,7 @@ The message names the setting. The most common:
 - `CONFIG: refusing to send the bind password to ldap.example.com:389 without TLS (RFC 4513 section 5.1.3). …` - use an `ldaps://` URL, or set `ldapAllowCleartext` to accept the risk
 - `CONFIG: no LDAP server configured. …` - set the test URL to an LDAP URL, or set `ldapHost`
 - `CONFIG: ldapExpectedNamingContext needs the Root DSE search, so it cannot be used with …` - remove the base DN from the URL (keep the trailing `/`), or remove `ldapBindOnly`
+- `CONFIG: ldapCaBase64 holds no certificate; …` or `CONFIG: ldapCaBase64 holds an empty certificate block; paste the whole PEM certificate` - store the complete PEM certificate, from `-----BEGIN CERTIFICATE-----` to `-----END CERTIFICATE-----`, as text or base64-encoded
 
 #### `TCP: connection to ldap.example.com:636 failed after 3 attempts: …`
 **Cause:** Network connectivity issues, or the LDAP server is down. The text after the colon is the network error, for example a refused connection (`ECONNREFUSED`) or a failed name lookup (`ENOTFOUND`).
@@ -343,7 +344,7 @@ Enable detailed logging with the `ldapDebugMode: true` credential to see:
 - The target and where it came from (test URL or `ldapHost`), and the search base
 - Whether custom or system CA certificates are used, and the server certificate's expiry date
 - Bind and search round-trip times and result codes, and the search's base, filter and attributes
-- The Root DSE attributes the server returned
+- The five requested Root DSE attributes, as the server returned them, and whether `currentTime` could not be parsed
 
 ### Testing Outside ThousandEyes
 
