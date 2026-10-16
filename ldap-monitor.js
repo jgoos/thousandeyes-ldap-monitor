@@ -39,7 +39,7 @@
  *
  * A failure is one line that starts with its class:
  *   CONFIG: …                       missing or invalid configuration; nothing was sent
- *   TCP: …                          the connection could not be opened
+ *   TCP: …                          the connection could not be opened (name lookup, refused, unreachable)
  *   TLS: …                          the TLS handshake or certificate verification failed
  *   TIMEOUT: …                      a connect or a response took longer than the time limit allows
  *   BIND: …, SEARCH: …              a protocol error during that operation
@@ -475,7 +475,7 @@ const describeError = (err) => {
 /**
  * An error whose one-line message starts with its failure class (see the header), so an alert or
  * log line says what kind of failure it is before the details.
- * @param {string} failureClass - CONFIG, TCP, TLS, TIMEOUT, BIND or SEARCH
+ * @param {string} failureClass - CONFIG, TCP, TLS, TIMEOUT, BIND, SEARCH or ROOTDSE
  * @param {string} message
  * @param {unknown} [cause]
  */
