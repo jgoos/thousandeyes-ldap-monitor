@@ -66,7 +66,7 @@ These credentials can override the default values:
 
 **Base DN for Search:**
 - **Name:** `ldapBaseDN` (or alternatives: `ldapbasedn`, `LdapBaseDN`, `LDAPBASEDN`, `ldap_base_dn`, `LDAP_BASE_DN`)
-- **Value:** Base DN for the base-scope search, used when the test URL has no DN
+- **Value:** Base DN for the base-scope search, used when the test URL has no `/` path. A URL ending in `/` explicitly searches the Root DSE
 - **Note:** Leave unset to search the Root DSE
 
 **Allow Cleartext Bind:**
@@ -91,7 +91,7 @@ These credentials can override the default values:
 In the "Add New Test" pane:
 - Choose `Browser Synthetics → Transaction`
 - Set the **URL** to the server as an LDAP URL (RFC 4516):
-  - `ldaps://ldap.example.com` for LDAPS on port 636, searching the Root DSE
+  - `ldaps://ldap.example.com` for LDAPS on port 636, searching the Root DSE, or `ldapBaseDN` if that credential is set. Use `ldaps://ldap.example.com/` (trailing slash) to always search the Root DSE
   - `ldaps://dc01.example.com:3269/DC=example,DC=com` for another port, or to search a base DN
   - `ldap://ldap.example.com:389` for plain LDAP (also set `ldapAllowCleartext`)
 - Put special characters in the DN in percent-encoded form, for example `%26` for `&`. Attributes, scope and filter parts are not supported.
