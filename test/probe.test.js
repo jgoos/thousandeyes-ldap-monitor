@@ -310,6 +310,20 @@ describe('response framing and decoding', () => {
     const result = await probe({ bind: () => [ldap.bindResponse(1, 49, { diagnostic: 'line one\nline two' })] }, bindOnly);
     assert.match(result.failure, /server: "line one line two"/);
   });
+
+  it('replaces Unicode separators, C1 controls and bidi overrides in diagnosticMessage', async () => {
+    const diagnostic = 'one\u2028two\u2029three\u0085four\u202efive\u2066six';
+    const result = await probe({ bind: () => [ldap.bindResponse(1, 49, { diagnostic })] }, bindOnly);
+    assert.match(result.failure, /server: "one two three four five six"/);
+  });
+
+  it('fails when many small messages together exceed the response size limit', async () => {
+    const reference = ldap.message(2, tlv(0x73, tlv(0x04, Buffer.from(`ldap://other.test/${'x'.repeat(1000)}`))));
+    const flood = Buffer.concat(Array.from({ length: 1100 }, () => reference));
+    const result = await probe({ bind: bindOk, search: () => [flood, ldap.searchDone(2, 0)] });
+    assert.equal(result.verdict, 'fail');
+    assert.match(result.failure, /^Search failed: server sent more than 1000000 bytes/);
+  });
 });
 
 describe('connection failures', () => {

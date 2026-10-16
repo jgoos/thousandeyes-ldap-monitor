@@ -20,7 +20,7 @@
 import { net, credentials, test, markers } from 'thousandeyes';
 
 // Constants
-const MAX_RESPONSE_SIZE = 1000000; // 1MB safety limit for search responses
+const MAX_RESPONSE_SIZE = 1000000; // 1MB safety limit for everything the server sends on one connection
 const TLS_ERROR_KEYWORDS = ['certificate', 'CERT_', 'SSL', 'TLS'];
 const CREDENTIAL_ALTERNATIVES = ['ldapbasedn', 'LdapBaseDN', 'LDAPBASEDN', 'ldap_base_dn', 'LDAP_BASE_DN'];
 const MAX_EMPTY_READS = 3; // consecutive empty reads treated as end of stream
@@ -110,9 +110,21 @@ const getLdapErrorMessage = (resultCode) => {
     : `Unknown LDAP result code ${resultCode} (0x${hex})`;
 };
 
-/** Server-supplied text, made safe for a one-line error: no control characters, bounded length. */
+/**
+ * Whether a character could break or disguise a one-line message: C0 and C1 controls, DEL,
+ * Unicode line and paragraph separators, and bidirectional formatting characters.
+ */
+const isUnsafeChar = (ch) =>
+  ch < ' ' ||
+  (ch >= '\u007f' && ch <= '\u009f') ||
+  ch === '\u2028' || ch === '\u2029' ||
+  ch === '\u200e' || ch === '\u200f' ||
+  (ch >= '\u202a' && ch <= '\u202e') ||
+  (ch >= '\u2066' && ch <= '\u2069');
+
+/** Server-supplied text, made safe for a one-line error: no unsafe characters, bounded length. */
 const sanitizeServerText = (text) =>
-  Array.from(text, (ch) => (ch < ' ' || ch === '\u007f' ? ' ' : ch)).join('').trim().slice(0, MAX_DIAGNOSTIC_LENGTH);
+  Array.from(text, (ch) => (isUnsafeChar(ch) ? ' ' : ch)).join('').trim().slice(0, MAX_DIAGNOSTIC_LENGTH);
 
 /**
  * Describe an LDAPResult, including the server's diagnosticMessage and matchedDN when present.
@@ -285,6 +297,7 @@ function decodeLdapResult({ pdu, op }) {
  */
 function createLdapMessageReader(sock) {
   let buffered = Buffer.alloc(0);
+  let received = 0; // every byte on the connection, so many small messages cannot evade the limit
   let emptyReads = 0;
   return async function nextMessage() {
     for (;;) {
@@ -303,8 +316,9 @@ function createLdapMessageReader(sock) {
         continue;
       }
       emptyReads = 0;
+      received += chunk.length;
+      if (received > MAX_RESPONSE_SIZE) throw new Error(`server sent more than ${MAX_RESPONSE_SIZE} bytes`);
       buffered = Buffer.concat([buffered, chunk]);
-      if (buffered.length > MAX_RESPONSE_SIZE) throw new Error(`response exceeds ${MAX_RESPONSE_SIZE} bytes`);
     }
   };
 }
