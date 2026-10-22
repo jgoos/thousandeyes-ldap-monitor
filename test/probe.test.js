@@ -27,7 +27,8 @@ async function probe(scenario, { credentials = {}, settings, tls, routes, timeLi
   try {
     const result = await runProbe({
       credentials: {
-        ldapMonUser: DN, ldapMonPass: PASSWORD, ldapHost: HOST, ldapPort: String(port), ...credentials,
+        ldapMonUser: DN, ldapMonPass: PASSWORD, ldapHost: HOST, ldapPort: String(port), ldapAllowCleartext: 'true',
+        ...credentials,
       },
       settings,
       enforceSocketTimeout,
@@ -63,11 +64,11 @@ describe('configuration checks', () => {
     assert.match(result.failure, /Invalid port 1389/);
   });
 
-  it('targets the host and port from the test URL (B4)', { todo: 'B4: host/port come from credentials only' }, async () => {
+  it('targets the host and port from the test URL (B4)', async () => {
     const server = await startFakeLdap({ bind: bindOk });
     try {
       const result = await runProbe({
-        credentials: { ldapMonUser: DN, ldapMonPass: PASSWORD, ldapBindOnly: 'true' },
+        credentials: { ldapMonUser: DN, ldapMonPass: PASSWORD, ldapBindOnly: 'true', ldapAllowCleartext: 'true' },
         settings: { url: 'ldap://ldap-b.test:389' },
         routes: { 'ldap-b.test:389': `127.0.0.1:${server.port}` },
       });
@@ -149,11 +150,11 @@ describe('search', () => {
     assert.equal(result.verdict, 'pass');
   });
 
-  it('sends a base-scope (objectClass=*) search on the bind DN with messageID 2', async () => {
+  it('sends a base-scope (objectClass=*) search of the Root DSE with messageID 2', async () => {
     const result = await probe({ bind: bindOk, search: () => [entry(), ldap.searchDone(2, 0)] });
     const [searchReq] = requestsOf(result, TAG.searchRequest);
     assert.equal(searchReq.messageId, 2);
-    assert.equal(searchReq.baseObject, DN);
+    assert.equal(searchReq.baseObject, '');
     assert.equal(searchReq.scope.value, 0);
     assert.equal(searchReq.derefAliases.value, 0);
     assert.equal(searchReq.sizeLimit, 1);
@@ -223,7 +224,7 @@ describe('search', () => {
     assert.deepEqual(searchReq.attributes, ['1.1']);
   });
 
-  it('uses ldapBaseDN as the search base when it is set (B17)', { todo: 'B17: ldapBaseDN is read but never used' }, async () => {
+  it('uses ldapBaseDN as the search base when it is set (B17)', async () => {
     const result = await probe(
       { bind: bindOk, search: () => [ldap.searchDone(2, 0)] },
       { credentials: { ldapBaseDN: 'dc=example,dc=com' } },
@@ -327,27 +328,156 @@ describe('response framing and decoding', () => {
   });
 });
 
+describe('target and search base', () => {
+  // A fake LDAP server reached through `url`, with the routes the stub needs for it.
+  async function probeUrl(url, { credentials = {}, scenario = { bind: bindOk, search: () => [ldap.searchDone(2, 0)] } } = {}) {
+    const server = await startFakeLdap(scenario);
+    try {
+      const result = await runProbe({
+        credentials: { ldapMonUser: DN, ldapMonPass: PASSWORD, ldapAllowCleartext: 'true', ...credentials },
+        settings: { url },
+        routes: Object.fromEntries(['ldap.test:389', 'ldap-b.test:1389', '::1:389'].map((k) => [k, `127.0.0.1:${server.port}`])),
+      });
+      return { ...result, requests: server.requests };
+    } finally {
+      await server.close();
+    }
+  }
+  const searchBase = (result) => requestsOf(result, TAG.searchRequest)[0]?.baseObject;
+
+  it('searches the Root DSE when no base DN is configured', async () => {
+    const result = await probeUrl('ldap://ldap.test');
+    assert.equal(result.verdict, 'pass', result.failure ?? '');
+    assert.equal(searchBase(result), '');
+  });
+
+  it('uses any port given in the test URL', async () => {
+    const result = await probeUrl('ldap://ldap-b.test:1389');
+    assert.equal(result.verdict, 'pass', result.failure ?? '');
+    assert.deepEqual(eventsOf(result, 'connect').map((e) => `${e.host}:${e.port}`), ['ldap-b.test:1389']);
+  });
+
+  it('takes the search base from the DN in the test URL, percent-decoded', async () => {
+    const result = await probeUrl('ldap://ldap.test:389/ou=R%26D,dc=example,dc=com');
+    assert.equal(searchBase(result), 'ou=R&D,dc=example,dc=com');
+  });
+
+  it('prefers the DN in the test URL over the ldapBaseDN credential', async () => {
+    const result = await probeUrl('ldap://ldap.test/dc=from-url', { credentials: { ldapBaseDN: 'dc=from-credential' } });
+    assert.equal(searchBase(result), 'dc=from-url');
+  });
+
+  it('uses ldapBaseDN when the test URL has no "/" path', async () => {
+    const result = await probeUrl('ldap://ldap.test', { credentials: { ldapBaseDN: 'dc=from-credential' } });
+    assert.equal(searchBase(result), 'dc=from-credential');
+  });
+
+  it('keeps an explicit Root DSE ("/" with an empty DN) over the ldapBaseDN credential', async () => {
+    const result = await probeUrl('ldap://ldap.test/', { credentials: { ldapBaseDN: 'dc=from-credential' } });
+    assert.equal(searchBase(result), '');
+  });
+
+  it('prefers the test URL over the ldapHost credential', async () => {
+    const result = await probeUrl('ldap://ldap.test', { credentials: { ldapHost: 'ignored.test', ldapPort: '389' } });
+    assert.deepEqual(eventsOf(result, 'connect').map((e) => e.host), ['ldap.test']);
+  });
+
+  it('accepts an IPv6 literal in brackets', async () => {
+    const result = await probeUrl('ldap://[::1]:389');
+    assert.equal(result.verdict, 'pass', result.failure ?? '');
+    assert.deepEqual(eventsOf(result, 'connect').map((e) => e.host), ['::1']);
+    assert.match(result.stdout, /Warning: sending the bind password to \[::1\]:389 without TLS/);
+  });
+
+  it('decodes a percent-encoded host name (RFC 3986 3.2.2)', async () => {
+    const result = await probeUrl('ldap://ldap%2Etest:389');
+    assert.equal(result.verdict, 'pass', result.failure ?? '');
+    assert.deepEqual(eventsOf(result, 'connect').map((e) => e.host), ['ldap.test']);
+  });
+
+  it('falls back to the ldapHost credential when the test URL is not an LDAP URL', async () => {
+    const result = await probeUrl('https://www.example.com/', { credentials: { ldapHost: 'ldap.test', ldapPort: '389' } });
+    assert.equal(result.verdict, 'pass', result.failure ?? '');
+    assert.deepEqual(eventsOf(result, 'connect').map((e) => e.host), ['ldap.test']);
+  });
+
+  it('defaults the ldapPort credential to 636 with LDAPS', async () => {
+    const result = await runProbe({ credentials: { ldapMonUser: DN, ldapMonPass: PASSWORD, ldapHost: 'nowhere.test' } });
+    assert.deepEqual(eventsOf(result, 'connectTls').map((e) => e.port), [636, 636, 636]);
+  });
+
+  it('reports a configuration error, without connecting, when no server is configured (B23)', async () => {
+    const result = await runProbe({ credentials: { ldapMonUser: DN, ldapMonPass: PASSWORD } });
+    assert.equal(result.verdict, 'fail');
+    assert.match(result.failure, /^Configuration error: no LDAP server configured/);
+    assert.equal(eventsOf(result, 'connect').length + eventsOf(result, 'connectTls').length, 0);
+  });
+
+  for (const [url, reason] of [
+    ['ldap://ldap.test/dc=example?cn?sub', /attributes, scope, filter and extensions are not supported/],
+    ['ldap:///dc=example', /has no host/],
+    ['ldap://ldap.test:99999', /invalid port/],
+    ['ldap://ldap.test/ou=%E0%A4%A', /invalid percent-encoding/],
+    ['ldap://ldap%ZZtest', /host .* invalid percent-encoding/],
+    ['ldap://ldap%20test', /invalid host name/],
+    ['ldap://[not-an-ip]', /invalid IPv6 address/],
+  ]) {
+    it(`rejects the test URL ${url}`, async () => {
+      const result = await probeUrl(url);
+      assert.equal(result.verdict, 'fail');
+      assert.match(result.failure, /^Configuration error: /);
+      assert.match(result.failure, reason);
+      assert.equal(eventsOf(result, 'connect').length, 0);
+    });
+  }
+});
+
+describe('cleartext bind policy (RFC 4513 5.1.3)', () => {
+  it('refuses to send the password over plain LDAP without ldapAllowCleartext', async () => {
+    const result = await runProbe({
+      credentials: { ldapMonUser: DN, ldapMonPass: PASSWORD },
+      settings: { url: 'ldap://ldap.test:389' },
+      routes: { 'ldap.test:389': '127.0.0.1:1' },
+    });
+    assert.equal(result.verdict, 'fail');
+    assert.match(result.failure, /^Configuration error: refusing to send the bind password to ldap\.test:389 without TLS/);
+    assert.match(result.failure, /ldapAllowCleartext/);
+    assert.equal(eventsOf(result, 'connect').length, 0);
+  });
+
+  it('applies the same policy to port 389 from the credentials', async () => {
+    const result = await runProbe({ credentials: { ldapMonUser: DN, ldapMonPass: PASSWORD, ldapHost: HOST, ldapPort: '389' } });
+    assert.match(result.failure, /^Configuration error: refusing to send the bind password/);
+  });
+
+  it('warns and proceeds when ldapAllowCleartext is set', async () => {
+    const result = await probe({ bind: bindOk }, { credentials: { ldapBindOnly: 'true', ldapAllowCleartext: 'TRUE' } });
+    assert.equal(result.verdict, 'pass', result.failure ?? '');
+    assert.match(result.stdout, /Warning: sending the bind password to ldap\.test:389 without TLS/);
+  });
+});
+
 describe('connection failures', () => {
   it('fails after three attempts when the connection is refused', async () => {
-    const result = await runProbe({ credentials: { ldapMonUser: DN, ldapMonPass: PASSWORD, ldapHost: 'down.test', ldapPort: '389' } });
+    const result = await runProbe({ credentials: { ldapMonUser: DN, ldapMonPass: PASSWORD, ldapHost: 'down.test', ldapPort: '389', ldapAllowCleartext: 'true' } });
     assert.equal(result.verdict, 'fail');
     assert.match(result.failure, /Connection failed after 3 attempts/);
   });
 
   it('includes the network error in the failure (B13)', async () => {
-    const result = await runProbe({ credentials: { ldapMonUser: DN, ldapMonPass: PASSWORD, ldapHost: 'down.test', ldapPort: '389' } });
+    const result = await runProbe({ credentials: { ldapMonUser: DN, ldapMonPass: PASSWORD, ldapHost: 'down.test', ldapPort: '389', ldapAllowCleartext: 'true' } });
     assert.match(result.failure, /ECONNREFUSED/);
   });
 
   it('retries without restarting markers that were already used (B12)', async () => {
-    const result = await runProbe({ credentials: { ldapMonUser: DN, ldapMonPass: PASSWORD, ldapHost: 'down.test', ldapPort: '389' } });
+    const result = await runProbe({ credentials: { ldapMonUser: DN, ldapMonPass: PASSWORD, ldapHost: 'down.test', ldapPort: '389', ldapAllowCleartext: 'true' } });
     assert.equal(eventsOf(result, 'marker.error').length, 0);
   });
 
   it('fails a connect that never completes before the test time limit (B11)', async () => {
     const result = await runProbe(
       {
-        credentials: { ldapMonUser: DN, ldapMonPass: PASSWORD, ldapHost: HOST, ldapPort: '389' },
+        credentials: { ldapMonUser: DN, ldapMonPass: PASSWORD, ldapHost: HOST, ldapPort: '389', ldapAllowCleartext: 'true' },
         settings: { timeout: 1 },
         routes: { [`${HOST}:389`]: 'hang' },
       },
@@ -358,7 +488,7 @@ describe('connection failures', () => {
   });
 
   it('records each attempt under its own marker and the connect marker once', async () => {
-    const result = await runProbe({ credentials: { ldapMonUser: DN, ldapMonPass: PASSWORD, ldapHost: 'down.test', ldapPort: '389' } });
+    const result = await runProbe({ credentials: { ldapMonUser: DN, ldapMonPass: PASSWORD, ldapHost: 'down.test', ldapPort: '389', ldapAllowCleartext: 'true' } });
     assert.equal(eventsOf(result, 'connect').length, 3);
     assert.deepEqual(eventsOf(result, 'marker.start').map((e) => e.name),
       ['ldap-attempt-1', 'ldap-tcp-connect', 'ldap-attempt-2', 'ldap-attempt-3']);
@@ -460,6 +590,20 @@ describe('LDAPS', () => {
     );
     assert.equal(result.verdict, 'pass');
     assert.equal(eventsOf(result, 'connectTls')[0].options.servername, undefined);
+  });
+
+  it('takes LDAPS and a non-default port from an ldaps:// test URL', { skip: skip() }, async () => {
+    const result = await tlsProbe(
+      { bind: bindOk },
+      {
+        credentials: { ldapBindOnly: 'true', ldapCaBase64: caBase64() },
+        settings: { url: 'ldaps://ldap.test:3269' },
+        routes: (port) => ({ 'ldap.test:3269': `127.0.0.1:${port}` }),
+      },
+    );
+    assert.equal(result.verdict, 'pass', result.failure ?? '');
+    assert.deepEqual(eventsOf(result, 'connectTls').map((e) => `${e.host}:${e.port}`), ['ldap.test:3269']);
+    assert.doesNotMatch(result.stdout, /without TLS/);
   });
 
   it('does not retry a certificate verification failure', { skip: skip() }, async () => {

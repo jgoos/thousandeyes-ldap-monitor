@@ -12,7 +12,8 @@ This repository contains a JavaScript monitoring script designed for ThousandEye
 - Executes fast base-scope searches against Root DSE
 - Measures and reports round-trip times for both operations
 - Alerts when operations exceed configurable thresholds (default: 300ms)
-- Supports both LDAP (port 389) and LDAPS (port 636) with TLS 1.2/1.3
+- Supports LDAPS (TLS 1.2/1.3) on any port, and plain LDAP only when you opt in, because a simple bind sends the password as is
+- Takes the server, port and search base from the test URL, so each test can monitor its own server
 
 ## Repository Structure
 
@@ -58,18 +59,20 @@ Create these secure credential entries:
 
 These credentials can override the default values:
 
-**LDAP Server Hostname:**
-- **Name:** `ldapHost`
-- **Value:** LDAP server hostname or IP address (default: `ldap.example.com`)
-
-**LDAP Server Port:**
-- **Name:** `ldapPort`
-- **Value:** LDAP server port number (default: `636` for LDAPS, use `389` for LDAP)
+**LDAP Server Hostname and Port (fallback):**
+- **Names:** `ldapHost` and `ldapPort`
+- **Value:** Server hostname or IP address, and port `636` (LDAPS, the default) or `389` (LDAP)
+- **Note:** Used only when the test URL is not an `ldap://` or `ldaps://` URL. Credentials apply to the whole account group, so prefer the test URL when you monitor more than one server
 
 **Base DN for Search:**
 - **Name:** `ldapBaseDN` (or alternatives: `ldapbasedn`, `LdapBaseDN`, `LDAPBASEDN`, `ldap_base_dn`, `LDAP_BASE_DN`)
-- **Value:** Base DN for search operations (default: uses bind DN for base scope search)
-- **Note:** Leave empty to search Root DSE
+- **Value:** Base DN for the base-scope search, used when the test URL has no `/` path. A URL ending in `/` explicitly searches the Root DSE
+- **Note:** Leave unset to search the Root DSE
+
+**Allow Cleartext Bind:**
+- **Name:** `ldapAllowCleartext`
+- **Value:** Set to `true`, `1`, or `yes` to allow a bind over plain LDAP (`ldap://` or port 389)
+- **Note:** Without it the script refuses to send the password unencrypted (RFC 4513 section 5.1.3) and fails with a configuration error before connecting
 
 **Debug Mode:**
 - **Name:** `ldapDebugMode`
@@ -87,6 +90,12 @@ These credentials can override the default values:
 
 In the "Add New Test" pane:
 - Choose `Browser Synthetics → Transaction`
+- Set the **URL** to the server as an LDAP URL (RFC 4516):
+  - `ldaps://ldap.example.com` for LDAPS on port 636, searching the Root DSE, or `ldapBaseDN` if that credential is set. Use `ldaps://ldap.example.com/` (trailing slash) to always search the Root DSE
+  - `ldaps://dc01.example.com:3269/DC=example,DC=com` for another port, or to search a base DN
+  - `ldap://ldap.example.com:389` for plain LDAP (also set `ldapAllowCleartext`)
+- Put special characters in the DN in percent-encoded form, for example `%26` for `&`. Attributes, scope and filter parts are not supported.
+- If the URL field does not accept an LDAP URL, enter any other URL and set the `ldapHost` and `ldapPort` credentials instead
 
 ### 3. Add the Monitoring Script
 
@@ -102,7 +111,7 @@ In the Script editor:
 1. Click the key icon above the editor
 2. Tick all credentials you've configured:
    - **Required:** `ldapMonUser` and `ldapMonPass`
-   - **Optional:** `ldapCaBase64`, `ldapHost`, `ldapPort`, `ldapBaseDN`, `ldapDebugMode`, `ldapBindOnly`
+   - **Optional:** `ldapCaBase64`, `ldapHost`, `ldapPort`, `ldapBaseDN`, `ldapAllowCleartext`, `ldapDebugMode`, `ldapBindOnly`
 3. Only select credentials you've actually created - the script will use defaults for missing optional credentials
 4. No plaintext credentials will ever appear in the script
 
@@ -147,11 +156,12 @@ All settings are configured through ThousandEyes Secure Credentials:
 ### Default Values
 
 When optional credentials are not provided, the script uses these defaults:
-- **Host:** `ldap.example.com` (override with `ldapHost` credential)
-- **Port:** `636` for LDAPS (override with `ldapPort` credential)
+- **Server:** none. The test URL or the `ldapHost` credential must name it, or the test fails with a configuration error
+- **Port:** `636` for `ldaps://` and `389` for `ldap://`, unless the URL gives one. With the `ldapHost` credential, `ldapPort` defaults to `636`
+- **Plain LDAP:** refused unless `ldapAllowCleartext` is set
 - **Timeout:** The test's time limit from ThousandEyes (default 30 seconds). Every connect and read is bounded by it, and the script stops about 10% early (at least 1 second) so that its own timeout error is reported
 - **Slow threshold:** `300ms` for both bind and search operations
-- **Base DN:** Uses bind DN for base scope search (override with `ldapBaseDN` credential)
+- **Base DN:** The Root DSE (override with a DN in the test URL, or with the `ldapBaseDN` credential)
 - **Retry attempts:** up to 2 retries of a failed connection, 100ms apart, within the time limit. TLS and certificate errors are not retried
 - **TLS version:** Minimum TLSv1.2 for LDAPS connections
 - **Debug mode:** Disabled (enable with `ldapDebugMode=true` credential)
@@ -245,9 +255,10 @@ Different LDAP implementations have different performance characteristics. The d
 
 #### Optimizing Search Operations
 The script automatically optimizes search operations by:
-- Using the bind DN as the search base for maximum compatibility
+- Searching the Root DSE, which every LDAPv3 server provides, unless you configure a base DN
 - Limiting search scope to `base` (single entry lookup)
 - Using simple present filters (`objectClass=*`)
+- Requesting no attributes (`1.1`), so only the result code comes back
 - Supporting bind-only mode (`ldapBindOnly: true`) for restrictive environments
 
 #### Troubleshooting with Debug Mode
@@ -288,29 +299,18 @@ Replace the bracketed placeholders with the actual values you'll store in your s
 
 ### LDAP Server-Specific Settings
 
-Different LDAP implementations may require specific configurations. Use secure credentials to customize the monitoring for your environment:
+Example test URLs for common servers. Add `ldapCaBase64` when the server certificate comes from a private CA.
 
 #### Active Directory
 ```
-ldapHost: dc01.corp.example.com
-ldapPort: 636
-ldapBaseDN: DC=corp,DC=example,DC=com
-ldapCaBase64: <base64-encoded-ca-cert> (if using custom certificates)
+ldaps://dc01.example.com/DC=example,DC=com        domain controller
+ldaps://dc01.example.com:3269                     global catalog over TLS
 ```
 
-#### OpenLDAP
+#### OpenLDAP, 389 Directory Server / Red Hat Directory Server, NetIQ eDirectory
 ```
-ldapHost: openldap.example.com
-ldapPort: 636
-ldapBaseDN: dc=example,dc=com
-```
-
-#### Oracle Directory Server / Red Hat Directory Server
-```
-ldapHost: rhds.example.com
-ldapPort: 636
-ldapBaseDN: dc=example,dc=com
-ldapBindOnly: true (recommended for compatibility)
+ldaps://ldap.example.com                          Root DSE
+ldaps://ldap.example.com/dc=example,dc=com        a naming context
 ```
 
 ### Special Operating Modes
@@ -346,7 +346,7 @@ Instead of modifying the script code, configure everything through secure creden
 
 To monitor multiple LDAP servers:
 
-1. Create separate tests for each server
+1. Create separate tests for each server, each with that server's LDAP URL as the test URL. The credentials can be shared.
 2. Use descriptive test names (e.g., "LDAP Monitor - DC01", "LDAP Monitor - DC02")
 3. Configure appropriate agents near each server
 4. Set up alert rules that consider your redundancy setup
@@ -400,7 +400,7 @@ To contribute improvements to this monitoring script:
 - Use ThousandEyes Secure Credentials for all sensitive data
 - Regularly rotate monitoring account passwords
 - Use read-only accounts with minimal permissions
-- Enable LDAPS (TLS) for encrypted communications (supports TLS 1.2 and 1.3)
+- Enable LDAPS (TLS) for encrypted communications (supports TLS 1.2 and 1.3). The script refuses a bind over plain LDAP unless `ldapAllowCleartext` is set
 - Monitor from trusted network segments when possible
 
 ## License
