@@ -3,7 +3,12 @@
  *
  * • Authenticated LDAPv3 simple bind
  * • Base-scope search of the Root DSE, or of a configured base DN
- * • Fails (throws) on error or if either round-trip exceeds `slowMs`
+ * • Root DSE checks: LDAPv3 in supportedLDAPVersion, Active Directory isSynchronized and clock skew
+ *   (currentTime), and optionally an expected naming context
+ * • LDAPS: a warning when the server certificate expires within ldapCertWarnDays
+ * • Fails (throws) on any error. Latency is not judged here: each step is a ThousandEyes marker
+ *   (ldap-tcp-connect or ldaps-ssl-handshake, ldap-bind, ldap-search), and alert rules on marker
+ *   duration flag slow steps (terraform/marker_alerts.tf)
  *
  * Target: the test URL, as an RFC 4516 LDAP URL
  *   ldaps://ldap.example.com            LDAPS on port 636, search the Root DSE
@@ -16,12 +21,31 @@
  *   ldapMonPass  →  password
  *
  * Optional Credentials:
- *   ldapCaBase64       →  CA certificate(s) for LDAPS, as PEM text or base64-encoded PEM
- *   ldapHost, ldapPort →  server and port (389 or 636) when the test URL is not an LDAP URL
- *   ldapBaseDN         →  search base when the test URL has no "/" path (default: Root DSE)
- *   ldapAllowCleartext →  'true' to allow sending the password without TLS (RFC 4513 5.1.3)
- *   ldapBindOnly       →  'true' to skip the search
- *   ldapDebugMode      →  'true' for verbose debugging (default: false)
+ *   ldapCaBase64              →  CA certificate(s) for LDAPS, as PEM text or base64-encoded PEM
+ *   ldapHost, ldapPort        →  server and port (389 or 636) when the test URL is not an LDAP URL
+ *   ldapBaseDN                →  search base when the test URL has no "/" path (default: Root DSE)
+ *   ldapAllowCleartext        →  'true' to allow sending the password without TLS (RFC 4513 5.1.3)
+ *   ldapBindOnly              →  'true' to skip the search
+ *   ldapExpectedNamingContext →  a DN the Root DSE must list in namingContexts (Root DSE search only)
+ *   ldapMaxClockSkewSeconds   →  most the Root DSE currentTime may differ from the agent clock
+ *                                (default: 300; 0 turns the check off)
+ *   ldapCertWarnDays          →  warn when the LDAPS server certificate expires within this many
+ *                                days (default: 30; 0 turns the warning off). The warning is a log
+ *                                line and a note in the PASS summary; the test still passes
+ *   ldapRequireEntry          →  'true' to fail a search that returns no entry. Off by default: some
+ *                                servers answer a base DN the account cannot read with success and
+ *                                no entry, rather than noSuchObject
+ *   ldapDebugMode             →  'true' for verbose debugging (default: false)
+ *
+ * A failure is one line that starts with its class:
+ *   CONFIG: …                       missing or invalid configuration; nothing was sent
+ *   TCP: …                          the connection could not be opened (name lookup, refused, unreachable)
+ *   TLS: …                          the TLS handshake or certificate verification failed
+ *   TIMEOUT: …                      a connect or a response took longer than the time limit allows
+ *   BIND: …, SEARCH: …              a protocol error during that operation
+ *   ROOTDSE: …                      the Root DSE reports a problem (see Root DSE checks)
+ *   BIND rc=49 invalidCredentials: …, SEARCH rc=32 noSuchObject: …
+ *                                   the server returned that LDAP result code
  */
 
 import { net, credentials, test, markers } from 'thousandeyes';
@@ -38,6 +62,11 @@ const MIN_TIME_MARGIN_MS = 1000; // left before the time limit for reporting
 const CLEANUP_TIMEOUT_MS = 1000; // most that Unbind and socket close may take together
 const MAX_EMPTY_READS = 3; // consecutive empty reads treated as end of stream
 const MAX_DIAGNOSTIC_LENGTH = 200; // characters of server diagnosticMessage kept in errors
+const MAX_QUOTED_VALUES = 5; // server attribute values quoted in one message
+const MAX_DN_LENGTH = 4096; // a longer namingContexts value is not compared, and matches nothing
+const DEFAULT_MAX_CLOCK_SKEW_S = 300; // Kerberos' default tolerance for clock skew
+const DEFAULT_CERT_WARN_DAYS = 30; // warn this long before the LDAPS server certificate expires
+const DAY_MS = 24 * 60 * 60 * 1000;
 
 /* ───────────── LDAP protocol codec (RFC 4511; BER per section 5.1) ───────────── */
 
@@ -47,6 +76,7 @@ const LDAP_TAG = {
   octetString: 0x04,
   enumerated: 0x0a,
   sequence: 0x30,
+  set: 0x31,
   bindRequest: 0x60,          // [APPLICATION 0]
   bindResponse: 0x61,         // [APPLICATION 1]
   unbindRequest: 0x42,        // [APPLICATION 2], primitive NULL
@@ -65,6 +95,8 @@ const MESSAGE_ID = { bind: 1, search: 2, unbind: 3 };
 const SEARCH_SCOPE_BASE = 0;
 const NEVER_DEREF_ALIASES = 0;
 const NO_ATTRIBUTES = '1.1'; // RFC 4511 4.5.1.8: return no attributes
+// Root DSE attributes the checks read (RFC 4512 5.1; isSynchronized and currentTime are Active Directory's).
+const ROOT_DSE_ATTRIBUTES = ['namingContexts', 'supportedLDAPVersion', 'vendorVersion', 'isSynchronized', 'currentTime'];
 const NOTICE_OF_DISCONNECTION_OID = '1.3.6.1.4.1.1466.20036';
 
 /** RFC 4511 4.1.9 result codes. */
@@ -111,16 +143,15 @@ const LDAP_RESULT_CODES = {
 };
 
 /**
- * Human-readable result code: "name (code/0xNN): description".
+ * Human-readable result code: "rc=<code> <name>: <description>".
  * @param {number} resultCode
  * @returns {string}
  */
 const getLdapErrorMessage = (resultCode) => {
-  const hex = resultCode.toString(16).padStart(2, '0');
   const info = LDAP_RESULT_CODES[resultCode];
   return info
-    ? `${info.name} (${resultCode}/0x${hex}): ${info.description}`
-    : `Unknown LDAP result code ${resultCode} (0x${hex})`;
+    ? `rc=${resultCode} ${info.name}: ${info.description}`
+    : `rc=${resultCode}: Unknown LDAP result code (0x${resultCode.toString(16).padStart(2, '0')})`;
 };
 
 /**
@@ -302,6 +333,28 @@ function decodeLdapResult({ pdu, op }) {
 }
 
 /**
+ * Attributes of a SearchResultEntry (RFC 4511 4.5.2), keyed by attribute type in lower case,
+ * since attribute types are case-insensitive.
+ * @returns {Map<string, string[]>}
+ */
+function decodeEntryAttributes({ pdu, op }) {
+  const [objectName, attributes] = readBerChildren(pdu, op);
+  if (!attributes || objectName.tag !== LDAP_TAG.octetString || attributes.tag !== LDAP_TAG.sequence) {
+    throw new Error('malformed SearchResultEntry');
+  }
+  const entry = new Map();
+  for (const attribute of readBerChildren(pdu, attributes)) {
+    const [type, vals] = readBerChildren(pdu, attribute);
+    if (!vals || type.tag !== LDAP_TAG.octetString || vals.tag !== LDAP_TAG.set) {
+      throw new Error('malformed attribute in SearchResultEntry');
+    }
+    const values = readBerChildren(pdu, vals).map((value) => berValue(pdu, value).toString('utf8'));
+    entry.set(berValue(pdu, type).toString('utf8').toLowerCase(), values);
+  }
+  return entry;
+}
+
+/**
  * Reads whole LDAPMessages from a socket, whatever the TCP segmentation: buffers partial reads
  * and splits reads that hold several messages (RFC 4511 5.2: messages are framed only by their
  * BER length).
@@ -347,17 +400,22 @@ async function nextResponse(nextMessage, messageId) {
   if (message.messageId === 0 && message.opTag === LDAP_TAG.extendedResponse) {
     const result = decodeLdapResult(message);
     const kind = result.responseName === NOTICE_OF_DISCONNECTION_OID ? 'a Notice of Disconnection' : 'an unsolicited notification';
-    throw new Error(`server sent ${kind}: ${formatLdapResult(result)}`);
+    throw new Error(`server sent ${kind}, ${formatLdapResult(result)}`);
   }
   throw new Error(`unexpected message ID ${message.messageId} (expected ${messageId})`);
 }
 
-/** Run `step`, prefixing any error with "<phase> failed: ". */
+/**
+ * Run `step`, prefixing any error with its failure class: "<PHASE>: ", or "TIMEOUT: <phase>: " for
+ * a response that did not arrive in time.
+ */
 async function inPhase(phase, step) {
   try {
     return await step();
   } catch (err) {
-    throw new Error(`${phase} failed: ${err && err.message || 'Unknown error'}`, { cause: err });
+    const message = err && err.message || 'Unknown error';
+    const timedOut = err && err.code === 'ETIMEDOUT';
+    throw failure(timedOut ? 'TIMEOUT' : phase, timedOut ? `${phase.toLowerCase()}: ${message}` : message, err);
   }
 }
 
@@ -416,6 +474,18 @@ const describeError = (err) => {
 };
 
 /**
+ * An error whose one-line message starts with its failure class (see the header), so an alert or
+ * log line says what kind of failure it is before the details.
+ * @param {string} failureClass - CONFIG, TCP, TLS, TIMEOUT, BIND, SEARCH or ROOTDSE
+ * @param {string} message
+ * @param {unknown} [cause]
+ */
+const failure = (failureClass, message, cause) =>
+  new Error(`${failureClass}: ${message}`, cause === undefined ? undefined : { cause });
+
+const configError = (message) => failure('CONFIG', message);
+
+/**
  * Whether a connect error came from TLS rather than from the network. The error code decides when
  * there is one; otherwise the message is checked for TLS keywords with the host name removed, so
  * a host such as "certificate-gw.example.com" does not make a network error look like TLS.
@@ -448,13 +518,65 @@ function parseCaCertificates(value) {
   const pem = text.includes('-----BEGIN') ? text : Buffer.from(text, 'base64').toString('utf8');
   const blocks = pem.match(/-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICATE-----/g);
   if (!blocks) {
-    throw new Error('Configuration error: ldapCaBase64 holds no certificate; expected PEM text ("-----BEGIN CERTIFICATE-----"), as-is or base64-encoded');
+    throw configError('ldapCaBase64 holds no certificate; expected PEM text ("-----BEGIN CERTIFICATE-----"), as-is or base64-encoded');
   }
   return blocks.map((block) => {
     const body = block.replace(/-----(BEGIN|END) CERTIFICATE-----/g, '').replace(/\s+/g, '');
+    if (!body) throw configError('ldapCaBase64 holds an empty certificate block; paste the whole PEM certificate');
     return `-----BEGIN CERTIFICATE-----\n${body.match(/.{1,64}/g).join('\n')}\n-----END CERTIFICATE-----\n`;
   });
 }
+
+/**
+ * The server certificate of a TLS socket, or null. ThousandEyes does not document
+ * getPeerCertificate() for its sockets, so the method is feature-detected, and an error from it or
+ * a result that is not an object means the certificate is unknown.
+ * @returns {{ subject?: { CN?: unknown }, valid_to?: unknown } | null}
+ */
+const peerCertificateOf = (socket) => {
+  try {
+    const cert = socket && typeof socket.getPeerCertificate === 'function' ? socket.getPeerCertificate() : null;
+    return cert && typeof cert === 'object' ? cert : null;
+  } catch {
+    return null;
+  }
+};
+
+/** The certificate's subject CN, made safe for a log line; '' when it has none. */
+const certificateName = (cert) => {
+  const cn = cert && cert.subject && cert.subject.CN;
+  return typeof cn === 'string' || Array.isArray(cn) ? sanitizeServerText([].concat(cn).join(', ')) : '';
+};
+
+/**
+ * Milliseconds since the epoch for a certificate date such as Node's "Oct  3 20:15:30 2026 GMT".
+ * A date without a time zone is read as GMT, as certificate times are, not as agent local time.
+ * @param {unknown} text
+ * @returns {number} NaN when `text` is not a date
+ */
+const parseCertificateDate = (text) => {
+  if (typeof text !== 'string' || text.length > 64) return NaN;
+  const value = text.trim();
+  if (/(?:GMT|UTC|Z|[+-]\d{2}:?\d{2})$/i.test(value)) return Date.parse(value);
+  // "… 2026" takes a " GMT" suffix; an ISO date without a zone ("2026-10-03T20:15:30") takes "Z".
+  const asGmt = Date.parse(`${value} GMT`);
+  return Number.isFinite(asGmt) ? asGmt : Date.parse(`${value}Z`);
+};
+
+/**
+ * When the certificate expires, from its valid_to field.
+ * @returns {{ daysLeft: number, text: string, expiresAt: string } | null}
+ *   null when valid_to is missing or not a date. daysLeft may be fractional or negative; text is,
+ *   for example, "expires in 3 days".
+ */
+const certificateExpiry = (cert, nowMs) => {
+  const expiresMs = parseCertificateDate(cert && cert.valid_to);
+  if (!Number.isFinite(expiresMs)) return null;
+  const daysLeft = (expiresMs - nowMs) / DAY_MS;
+  const days = Math.floor(Math.abs(daysLeft));
+  const span = `${days} day${days === 1 ? '' : 's'}`;
+  return { daysLeft, text: daysLeft < 0 ? `expired ${span} ago` : `expires in ${span}`, expiresAt: new Date(expiresMs).toISOString() };
+};
 
 /** Start or stop a ThousandEyes marker; a marker error is logged, never fatal. */
 const startMarker = (name) => {
@@ -472,19 +594,145 @@ const stopMarker = (name) => {
   }
 };
 
-/* ───────────── Target configuration ───────────── */
+/* ───────────── Root DSE checks ───────────── */
 
-const configError = (message) => new Error(`Configuration error: ${message}`);
+/**
+ * Milliseconds since the epoch for a GeneralizedTime (RFC 4517 3.3.13), such as Active
+ * Directory's "20261016201530.0Z".
+ * @param {string} text
+ * @returns {number} NaN when `text` is not a GeneralizedTime
+ */
+function parseGeneralizedTime(text) {
+  const value = String(text).trim();
+  if (value.length > 64) return NaN;
+  // g-time-zone is "Z" or a differential of hours and optional minutes: +HH or +HHMM.
+  const match = /^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})?(\d{2})?(?:[.,](\d+))?(?:(Z)|([+-])(\d{2})(\d{2})?)$/.exec(value);
+  if (!match) return NaN;
+  const [year, month, day, hour, minute, second] = match.slice(1, 7).map((part) => (part === undefined ? undefined : Number(part)));
+  const [fraction, utc, sign, offsetHours, offsetMinutes = '00'] = match.slice(7);
+  if (month < 1 || month > 12 || day < 1 || day > 31 || hour > 23 || minute > 59 || second > 60) return NaN;
+  if (!utc && (Number(offsetHours) > 23 || Number(offsetMinutes) > 59)) return NaN;
+  let ms = Date.UTC(year, month - 1, day, hour, minute ?? 0, second ?? 0);
+  // A fraction is of the last unit given: second, minute or hour.
+  if (fraction) ms += Number(`0.${fraction}`) * (second !== undefined ? 1000 : minute !== undefined ? 60000 : 3600000);
+  // Local time ahead of UTC (+) is later on the clock than the same instant in UTC.
+  if (!utc) ms -= (sign === '-' ? -1 : 1) * (Number(offsetHours) * 60 + Number(offsetMinutes)) * 60000;
+  return ms;
+}
+
+/**
+ * A DN for comparison: lower case, without the spaces around "," "=" and "+" separators or at
+ * either end. A character escaped with "\" is part of a value, so "cn=a\, b" keeps its space.
+ * Hex escapes ("\2C") and the order of a multi-valued RDN are compared as written. One pass, so a
+ * hostile value cannot make it slow.
+ * @param {string} dn
+ * @returns {string | null} null for a DN longer than MAX_DN_LENGTH, which then matches nothing
+ */
+function normalizeDn(dn) {
+  const text = String(dn);
+  if (text.length > MAX_DN_LENGTH) return null;
+  let out = '';
+  let spaces = 0; // unescaped spaces not yet written: dropped before a separator or at the end
+  let atStart = true; // at the start, or just after a separator, where spaces are dropped too
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (ch === ' ') {
+      spaces++;
+    } else if (',=+'.includes(ch)) {
+      out += ch;
+      spaces = 0;
+      atStart = true;
+    } else {
+      const escaped = ch === '\\' && i + 1 < text.length ? ch + text[++i] : ch;
+      out += (atStart ? '' : ' '.repeat(spaces)) + escaped.toLowerCase();
+      spaces = 0;
+      atStart = false;
+    }
+  }
+  return out;
+}
+
+/** Server attribute values for a message: quoted, made safe, and at most MAX_QUOTED_VALUES. */
+const quoteValues = (values) => values.slice(0, MAX_QUOTED_VALUES).map((v) => `"${sanitizeServerText(v)}"`).join(', ') +
+  (values.length > MAX_QUOTED_VALUES ? `, and ${values.length - MAX_QUOTED_VALUES} more` : '');
+
+/**
+ * Check what the Root DSE (RFC 4512 5.1) says about the server. Attributes a server does not
+ * publish are not checked, except namingContexts when an expected naming context is set.
+ * @param {Map<string, string[]> | null} entry - the Root DSE attributes; null when no entry came back
+ * @param {{ expectedNamingContext: string, maxClockSkewS: number, agentTimeMs: number }} options
+ *   agentTimeMs is the agent clock when the server answered; maxClockSkewS 0 skips the skew check
+ * @returns {string[]} facts for the PASS summary, such as the vendorVersion and clock skew
+ * @throws {Error} a ROOTDSE failure that lists every problem found
+ */
+function checkRootDse(entry, { expectedNamingContext, maxClockSkewS, agentTimeMs }) {
+  const values = (name) => (entry && entry.get(name.toLowerCase())) || [];
+  const problems = [];
+  const facts = [];
+
+  const [vendorVersion] = values('vendorVersion');
+  if (vendorVersion) facts.push(`vendorVersion: ${sanitizeServerText(vendorVersion)}`);
+
+  // Active Directory publishes FALSE until the domain controller is fully synchronized.
+  if (values('isSynchronized').some((v) => v.trim().toUpperCase() === 'FALSE')) {
+    problems.push('isSynchronized is FALSE: the server reports that it is not fully synchronized');
+  }
+
+  const versions = values('supportedLDAPVersion');
+  if (versions.length > 0 && !versions.some((v) => v.trim() === '3')) {
+    problems.push(`supportedLDAPVersion lists ${quoteValues(versions)} but not 3`);
+  }
+
+  if (expectedNamingContext) {
+    const contexts = values('namingContexts');
+    const wanted = normalizeDn(expectedNamingContext);
+    if (!entry) {
+      problems.push(`the server returned no Root DSE entry; expected namingContexts to include "${expectedNamingContext}"`);
+    } else if (contexts.length === 0) {
+      problems.push(`the Root DSE lists no namingContexts; expected "${expectedNamingContext}"`);
+    } else if (wanted === null || !contexts.some((dn) => normalizeDn(dn) === wanted)) {
+      problems.push(`namingContexts does not include "${expectedNamingContext}"; the server lists ${quoteValues(contexts)}`);
+    }
+  }
+
+  // The agent clock is the reference. Kerberos fails beyond its tolerance, 5 minutes by default.
+  const [currentTime] = values('currentTime');
+  const serverTimeMs = currentTime ? parseGeneralizedTime(currentTime) : NaN;
+  if (Number.isFinite(serverTimeMs)) {
+    const skewS = Math.round((serverTimeMs - agentTimeMs) / 1000);
+    facts.push(`clock skew: ${skewS < 0 ? '-' : '+'}${Math.abs(skewS)} s`);
+    if (maxClockSkewS > 0 && Math.abs(skewS) > maxClockSkewS) {
+      problems.push(`server clock is ${Math.abs(skewS)} s ${skewS > 0 ? 'ahead of' : 'behind'} the agent clock ` +
+        `(currentTime ${sanitizeServerText(currentTime)}); the limit is ${maxClockSkewS} s (ldapMaxClockSkewSeconds)`);
+    }
+  }
+
+  if (problems.length > 0) throw failure('ROOTDSE', problems.join('; '));
+  return facts;
+}
+
+/* ───────────── Target configuration ───────────── */
 
 /** Credential flag: 'true', '1' or 'yes', in any letter case. */
 const isEnabled = (value) => ['true', '1', 'yes'].includes(String(value || '').trim().toLowerCase());
+
+/**
+ * A whole-number credential, or `fallback` when it is not set.
+ * @throws {Error} a configuration error for anything but digits
+ */
+const wholeNumberSetting = (name, value, fallback) => {
+  const text = String(value ?? '').trim();
+  if (text === '') return fallback;
+  if (!/^\d+$/.test(text)) throw configError(`${name} must be a whole number, not "${sanitizeServerText(text)}"`);
+  return Number(text);
+};
 
 /**
  * Parse an RFC 4516 LDAP URL: ldap[s]://host[:port][/dn[?attributes?scope?filter?extensions]].
  * The scheme picks TLS, the port defaults to 389 or 636, and the DN is the search base. A "/"
  * with an empty DN selects the Root DSE explicitly; no "/" at all leaves the base unset (null).
  * Attributes, scope, filter and extensions must be empty: the probe always runs a base-scope
- * (objectClass=*) search that returns no attributes.
+ * (objectClass=*) search, for the Root DSE attributes it checks or, from a base DN, for none.
  * @param {unknown} url - test.getSettings().url
  * @returns {{ host: string, port: number, tls: boolean, baseDN: string | null } | null}
  *   null when `url` is not an ldap:// or ldaps:// URL
@@ -543,7 +791,7 @@ function resolveTarget({ testUrl, ldapHost, ldapPort, ldapBaseDN }) {
   }
   const port = parseInt(ldapPort, 10) || 636;
   if (port !== 389 && port !== 636) {
-    throw new Error(`Invalid port ${port}: Must be 389 (LDAP) or 636 (LDAPS) in the ldapPort credential; use an ldap:// or ldaps:// test URL for other ports`);
+    throw configError(`invalid port ${port} in the ldapPort credential: must be 389 (LDAP) or 636 (LDAPS); use an ldap:// or ldaps:// test URL for other ports`);
   }
   return { host, port, tls: port === 636, baseDN: ldapBaseDN, source: 'ldapHost credential' };
 }
@@ -605,11 +853,14 @@ const getTestConfig = () => {
     ldapBaseDN: typeof ldapBaseDN === 'string' ? ldapBaseDN.trim() : '',
     allowCleartext: isEnabled(getCredential('ldapAllowCleartext')),
     timeoutMs: testTimeLimitMs(testTimeout),
-    slowMs: 300,
     retryDelayMs: 100,
     maxRetries: 2,
     tlsMinVersion: 'TLSv1.2',
-    bindOnlyMode: isEnabled(getCredential('ldapBindOnly'))
+    bindOnlyMode: isEnabled(getCredential('ldapBindOnly')),
+    expectedNamingContext: String(getCredential('ldapExpectedNamingContext') ?? '').trim(),
+    maxClockSkewS: wholeNumberSetting('ldapMaxClockSkewSeconds', getCredential('ldapMaxClockSkewSeconds'), DEFAULT_MAX_CLOCK_SKEW_S),
+    requireEntry: isEnabled(getCredential('ldapRequireEntry')),
+    certWarnDays: wholeNumberSetting('ldapCertWarnDays', getCredential('ldapCertWarnDays'), DEFAULT_CERT_WARN_DAYS)
   };
 };
 
@@ -623,12 +874,15 @@ async function runTest() {
   /* ─────────── dynamic configuration loaded ─────────── */
   const {
     timeoutMs,
-    slowMs,
     retryDelayMs,
     maxRetries,
     tlsMinVersion,
     bindOnlyMode,
-    allowCleartext
+    allowCleartext,
+    expectedNamingContext,
+    maxClockSkewS,
+    requireEntry,
+    certWarnDays
   } = cfg;
   
   // Helper function for secure credential access  
@@ -654,12 +908,15 @@ async function runTest() {
   
   /* Input validation */
   if (!bindDN || !bindPwd) {
-    throw new Error('Missing credentials: Ensure ldapMonUser and ldapMonPass are configured');
+    throw configError('missing credentials: ensure ldapMonUser and ldapMonPass are configured');
   }
 
   const { host, port, tls: useTls, baseDN, source } = resolveTarget(cfg);
   if (debugMode) {
     console.log(`Debug: Target ${useTls ? 'ldaps' : 'ldap'}://${hostPort(host, port)} from the ${source}; search base ${baseDN ? `"${baseDN}"` : 'Root DSE'}`);
+  }
+  if (expectedNamingContext && (bindOnlyMode || baseDN)) {
+    throw configError(`ldapExpectedNamingContext needs the Root DSE search, so it cannot be used with ${bindOnlyMode ? 'ldapBindOnly' : `the search base "${baseDN}"`}`);
   }
 
   // A simple bind sends the password as is; without TLS anyone on the path can read it.
@@ -670,10 +927,6 @@ async function runTest() {
     console.log(`Warning: sending the bind password to ${hostPort(host, port)} without TLS (ldapAllowCleartext is set)`);
   }
 
-  if (slowMs <= 0) {
-    throw new Error('Invalid slowMs threshold: must be greater than 0');
-  }
-
   const deadline = probeStart + probeBudgetMs(timeoutMs);
   const remainingMs = () => deadline - Date.now();
 
@@ -682,13 +935,12 @@ async function runTest() {
   /**
    * Log TLS connection information in a TypeScript-safe way
    * @param {object} socket - The socket object (may or may not have TLS methods)
+   * @param {object | null} cert - from peerCertificateOf(socket)
    */
-  const logTLSInfo = (socket) => {
+  const logTLSInfo = (socket, cert) => {
     try {
       let cipher = null;
-      let cert = null;
-      let cn = null;
-      
+
       // Safely attempt to get cipher information
       if (socket && 'getCipher' in socket) {
         try {
@@ -700,25 +952,9 @@ async function runTest() {
           // Ignore cipher access errors
         }
       }
-      
-      // Safely attempt to get certificate information
-      if (socket && 'getPeerCertificate' in socket) {
-        try {
-          const getCertMethod = socket.getPeerCertificate;
-          if (typeof getCertMethod === 'function') {
-            cert = getCertMethod.call(socket);
-            if (cert && cert.subject && cert.subject.CN) {
-              cn = cert.subject.CN;
-            }
-          }
-        } catch {
-          // Ignore certificate access errors
-        }
-      }
-      
+
       const cipherName = cipher && cipher.name ? cipher.name : 'unknown';
-      const commonName = cn || 'unknown';
-      console.log(`TLS cipher: ${cipherName}; peer CN: ${commonName}`);
+      console.log(`TLS cipher: ${cipherName}; peer CN: ${certificateName(cert) || 'unknown'}`);
       
     } catch {
       // If anything fails, just log basic TLS connection info
@@ -767,6 +1003,9 @@ async function runTest() {
       }
     });
   };
+
+  // Notes for the PASS summary, such as a certificate that expires soon or the server version.
+  const facts = [];
 
   /* Performance metrics collector */
   const metrics = {
@@ -827,11 +1066,12 @@ async function runTest() {
       if (tlsFailure) {
         stopMarker(connectMarkerName);
         const hint = caBase64 ? '' : '. If the server certificate comes from a private CA, provide it in the ldapCaBase64 credential';
-        throw new Error(`TLS handshake with ${hostPort(host, port)} failed: ${describeError(err)}${hint}`, { cause: err });
+        throw failure('TLS', `handshake with ${hostPort(host, port)} failed: ${describeError(err)}${hint}`, err);
       }
       if (attempt > maxRetries || remainingMs() <= retryDelayMs) {
         stopMarker(connectMarkerName);
-        throw new Error(`Connection failed after ${attempt} attempt${attempt === 1 ? '' : 's'}: ${describeError(err)}`, { cause: err });
+        if (err && err.code === 'ETIMEDOUT') throw failure('TIMEOUT', `${err.message} (attempt ${attempt})`, err);
+        throw failure('TCP', `connection to ${hostPort(host, port)} failed after ${attempt} attempt${attempt === 1 ? '' : 's'}: ${describeError(err)}`, err);
       }
       await createDelay(retryDelayMs);
     }
@@ -839,7 +1079,17 @@ async function runTest() {
   stopMarker(connectMarkerName);
 
   if (useTls) {
-    logTLSInfo(sock);
+    const cert = peerCertificateOf(sock);
+    logTLSInfo(sock, cert);
+    const expiry = certificateExpiry(cert, Date.now());
+    if (debugMode) {
+      console.log(`Debug: Server certificate valid until ${expiry ? expiry.expiresAt : 'unknown (getPeerCertificate() gave no valid_to)'}`);
+    }
+    if (expiry && certWarnDays > 0 && expiry.daysLeft < certWarnDays) {
+      const name = certificateName(cert);
+      console.log(`Warning: the server certificate${name ? ` (CN ${name})` : ''} ${expiry.text}, on ${expiry.expiresAt}; ldapCertWarnDays is ${certWarnDays}`);
+      facts.push(`certificate ${expiry.text}`);
+    }
   }
 
   // The time budget bounds every wait; the socket idle timeout, where supported, is a backstop.
@@ -867,16 +1117,15 @@ async function runTest() {
     metrics.bindStart = Date.now();
     markers.start('ldap-bind');
     try {
-      // Defensive check for socket methods
-      if (!sock || typeof sock.writeAll !== 'function' || typeof sock.read !== 'function') {
-        throw new Error('Socket does not have required writeAll/read methods');
-      }
-
       if (debugMode) {
         console.log('Debug: Sending bind request');
       }
-      await sock.writeAll(ldapMessage(MESSAGE_ID.bind, bindRequest(bindDN, bindPwd)));
-      const bindResult = await inPhase('Bind', async () => {
+      const bindResult = await inPhase('BIND', async () => {
+        // Defensive check for socket methods
+        if (!sock || typeof sock.writeAll !== 'function' || typeof sock.read !== 'function') {
+          throw new Error('Socket does not have required writeAll/read methods');
+        }
+        await sock.writeAll(ldapMessage(MESSAGE_ID.bind, bindRequest(bindDN, bindPwd)));
         const response = await nextResponse(nextMessage, MESSAGE_ID.bind);
         if (response.opTag !== LDAP_TAG.bindResponse) {
           throw new Error(`expected a BindResponse, got tag 0x${response.opTag.toString(16)}`);
@@ -891,11 +1140,7 @@ async function runTest() {
       }
 
       if (bindResult.resultCode !== 0) {
-        throw new Error(`Authentication failed: ${formatLdapResult(bindResult)}`);
-      }
-
-      if (bindRTT > slowMs) {
-        throw new Error(`Slow bind: ${bindRTT} ms (>${slowMs}ms threshold)`);
+        throw new Error(`BIND ${formatLdapResult(bindResult)}`);
       }
     } finally {
       markers.stop('ldap-bind');
@@ -905,38 +1150,42 @@ async function runTest() {
     if (bindOnlyMode) {
       const totalTime = metrics.bindEnd - metrics.connectionStart;
       const connectionTime = metrics.connectionEnd - metrics.connectionStart;
-      console.log(`LDAP Monitor: PASS (Bind-Only) - Total ${totalTime}ms (connect: ${connectionTime}ms, bind: ${bindRTT}ms)`);
+      console.log(`LDAP Monitor: PASS (Bind-Only) - Total ${totalTime}ms (connect: ${connectionTime}ms, bind: ${bindRTT}ms)${facts.map((fact) => `; ${fact}`).join('')}`);
       return;
     }
 
     /* 3 ▸ Base-scope search of the search base, the Root DSE by default (messageID 2) */
-    // Request no attributes: the check needs only the result code.
+    // From the Root DSE, request only the attributes the checks read. From a base DN, request no
+    // attributes: the check needs only the result code, and the entry may be the account's own.
+    const attributes = baseDN ? [NO_ATTRIBUTES] : ROOT_DSE_ATTRIBUTES;
     const searchReq = ldapMessage(MESSAGE_ID.search, searchRequest({
       baseObject: baseDN,
       scope: SEARCH_SCOPE_BASE,
       sizeLimit: 1,
       timeLimit: 5, // seconds
       presentAttribute: 'objectClass',
-      attributes: [NO_ATTRIBUTES]
+      attributes
     }));
 
     if (debugMode) {
-      console.log(`Debug: Search - base scope on ${baseDN ? `"${baseDN}"` : 'the Root DSE'}, filter '(objectClass=*)', attributes '1.1'`);
+      console.log(`Debug: Search - base scope on ${baseDN ? `"${baseDN}"` : 'the Root DSE'}, filter '(objectClass=*)', attributes '${attributes.join(' ')}'`);
     }
 
     metrics.searchStart = Date.now();
     markers.start('ldap-search');
     let searchResult;
     let entries = 0;
+    let rootDse = null;
     try {
-      await sock.writeAll(searchReq);
       // Entries, references and intermediate responses may precede SearchResultDone (RFC 4511 4.5.2).
-      searchResult = await inPhase('Search', async () => {
+      searchResult = await inPhase('SEARCH', async () => {
+        await sock.writeAll(searchReq);
         for (;;) {
           const response = await nextResponse(nextMessage, MESSAGE_ID.search);
           switch (response.opTag) {
             case LDAP_TAG.searchResultEntry:
               entries++;
+              if (!baseDN && !rootDse) rootDse = decodeEntryAttributes(response);
               break;
             case LDAP_TAG.searchResultReference:
             case LDAP_TAG.intermediateResponse:
@@ -959,17 +1208,37 @@ async function runTest() {
     }
 
     if (searchResult.resultCode !== 0) {
-      throw new Error(`Search failed: ${formatLdapResult(searchResult)}`);
+      throw new Error(`SEARCH ${formatLdapResult(searchResult)}`);
     }
 
-    if (searchRTT > slowMs) {
-      throw new Error(`Slow search: ${searchRTT} ms (>${slowMs}ms threshold)`);
+    if (requireEntry && entries === 0) {
+      throw failure('SEARCH', `no entry returned for ${baseDN ? `"${baseDN}"` : 'the Root DSE'}; the base DN may not exist, or the account may not be allowed to read it (ldapRequireEntry is set)`);
+    }
+
+    if (!baseDN) {
+      // Log only the attributes requested, under their own names: the server's attribute types
+      // could otherwise put arbitrary text in the log.
+      if (debugMode) {
+        for (const name of ROOT_DSE_ATTRIBUTES) {
+          const values = rootDse && rootDse.get(name.toLowerCase());
+          if (values) console.log(`Debug: Root DSE ${name}: ${quoteValues(values)}`);
+        }
+        const [currentTime] = (rootDse && rootDse.get('currenttime')) || [];
+        if (currentTime !== undefined && Number.isNaN(parseGeneralizedTime(currentTime))) {
+          console.log('Debug: Root DSE currentTime is not a GeneralizedTime; clock skew not checked');
+        }
+      }
+      facts.push(...checkRootDse(rootDse, {
+        expectedNamingContext,
+        maxClockSkewS,
+        agentTimeMs: (metrics.searchStart + metrics.searchEnd) / 2
+      }));
     }
 
     // Final performance summary (visible in GUI)
     const totalTime = metrics.searchEnd - metrics.connectionStart;
     const connectionTime = metrics.connectionEnd - metrics.connectionStart;
-    console.log(`LDAP Monitor: PASS - Total ${totalTime}ms (connect: ${connectionTime}ms, bind: ${bindRTT}ms, search: ${searchRTT}ms)`);
+    console.log(`LDAP Monitor: PASS - Total ${totalTime}ms (connect: ${connectionTime}ms, bind: ${bindRTT}ms, search: ${searchRTT}ms)${facts.map((fact) => `; ${fact}`).join('')}`);
 
   } finally {
     /* End the LDAP session (RFC 4511 4.3), then close the socket. Both share one short window:

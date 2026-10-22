@@ -1,6 +1,6 @@
 # ThousandEyes LDAP Monitoring Terraform Module
 
-This directory contains Terraform configuration that automates LDAP monitoring with ThousandEyes. It deploys one transaction test per LDAP server, running `ldap-monitor.js`, with an alert rule for failed or timed-out runs. It also creates a role and an account group for monitoring administration.
+This directory contains Terraform configuration that automates LDAP monitoring with ThousandEyes. It deploys one transaction test per LDAP server, running `ldap-monitor.js`, with an alert rule for failed or timed-out runs and latency alert rules for slow steps. It also creates a role and an account group for monitoring administration.
 
 Each test's URL is an LDAP URL (RFC 4516), such as `ldaps://dc1.example.com:636/` or `ldaps://dc1.example.com:3269/DC=example,DC=com`. The script reads its target from the URL, so every test monitors its own server.
 
@@ -39,6 +39,7 @@ credential_ids = ["1001", "1002"] # ldapMonUser, ldapMonPass, plus optional cred
 alert_email_recipients = ["ldap-oncall@example.com"]
 # interval   = 300 # seconds: 60, 120, 300, 600, 900, 1800 or 3600
 # time_limit = 30  # seconds, 5-180 and at most half the interval
+# marker_alert_thresholds_ms = { "ldap-bind" = 300, "ldap-search" = 300, "ldaps-ssl-handshake" = 1000 }
 ```
 
 | `ldap_servers` field | Default | Notes |
@@ -50,6 +51,19 @@ alert_email_recipients = ["ldap-oncall@example.com"]
 
 The alert rule fires when a run completes with errors or times out (`txCompletionHasError`, `txCompletionTimedOut`). By default it needs 2 failing rounds out of 5. Change this with `alert_rounds_violating_required` and `alert_rounds_violating_out_of`. Tests collect console logs, so the script's PASS summary and failure messages are visible in the test views.
 
+### Latency alerts
+
+The script does not fail a slow run. It records each step as a ThousandEyes marker, and one alert rule per marker in `marker_alert_thresholds_ms` fires when that marker lasts at least the threshold, using the expression `((marker[((markerName == "ldap-bind"))]((markerDuration >= 300 ms))))` ([alert rule metadata](https://developer.cisco.com/docs/thousandeyes/alert-rule-metadata/)). These rules use the same rounds and recipients as the failure rule, and every test carries all of them.
+
+| Marker | Measures | Default threshold |
+|---|---|---|
+| `ldap-bind` | Simple bind round trip | 300 ms |
+| `ldap-search` | Base-scope search round trip (absent with `ldapBindOnly`) | 300 ms |
+| `ldaps-ssl-handshake` | TCP connect and TLS handshake, all attempts, LDAPS tests | none |
+| `ldap-tcp-connect` | TCP connect, all attempts, plain LDAP tests | none |
+
+Set `marker_alert_thresholds_ms = {}` to create no latency rules. Thresholds are whole milliseconds.
+
 ## Usage
 
 ```bash
@@ -60,7 +74,7 @@ terraform apply
 
 ## Checks without a ThousandEyes account
 
-`terraform test` plans the configuration against a mocked provider. It checks the test URLs, credentials, time limit, alert rule and input validation, and needs no API token. CI runs it with `terraform fmt -check` and `terraform validate`.
+`terraform test` plans the configuration against a mocked provider. It checks the test URLs, credentials, time limit, alert rules (failure and latency) and input validation, and needs no API token. CI runs it with `terraform fmt -check` and `terraform validate`.
 
 ## Provider version
 

@@ -33,7 +33,7 @@ describe('389 Directory Server', { skip: configured ? false : 'run via npm run t
   it('fails with invalidCredentials for a wrong password', async () => {
     const result = await run({ ldapMonPass: 'wrong-password' });
     assert.equal(result.verdict, 'fail');
-    assert.match(result.failure, /invalidCredentials/);
+    assert.match(result.failure, /^BIND rc=49 invalidCredentials: /);
   });
 
   it('passes bind and search over LDAP', async () => {
@@ -49,7 +49,7 @@ describe('389 Directory Server', { skip: configured ? false : 'run via npm run t
   it('fails over LDAPS when the server CA is not trusted', async () => {
     const result = await run({ ldapPort: '636', ldapBindOnly: 'true' });
     assert.equal(result.verdict, 'fail');
-    assert.match(result.failure, /^TLS handshake with .* failed: .*(self[- ]signed|unable to verify)/i);
+    assert.match(result.failure, /^TLS: handshake with .* failed: .*(self[- ]signed|unable to verify)/i);
   });
 
   it('searches the base DN given in an ldaps:// test URL', async () => {
@@ -60,13 +60,30 @@ describe('389 Directory Server', { skip: configured ? false : 'run via npm run t
   it('reports noSuchObject with the matched DN for a missing base DN', async () => {
     const result = await run({ ldapCaBase64: caBase64() }, { url: `ldaps://${host}/ou=missing,dc=example,dc=com` });
     assert.equal(result.verdict, 'fail');
-    assert.match(result.failure, /^Search failed: noSuchObject \(32\/0x20\).*matchedDN: "dc=example,dc=com"/);
+    assert.match(result.failure, /^SEARCH rc=32 noSuchObject: .*matchedDN: "dc=example,dc=com"/);
+  });
+
+  it('reads the Root DSE and reports the vendorVersion', async () => {
+    const result = await run({});
+    assert.equal(result.verdict, 'pass', result.failure ?? result.stdout);
+    assert.match(result.stdout, /LDAP Monitor: PASS - .*; vendorVersion: 389-Directory\//);
+  });
+
+  it('passes when the suffix is the expected naming context', async () => {
+    const result = await run({ ldapExpectedNamingContext: 'DC=Example, DC=Com' });
+    assert.equal(result.verdict, 'pass', result.failure ?? result.stdout);
+  });
+
+  it('fails when the expected naming context is not served', async () => {
+    const result = await run({ ldapExpectedNamingContext: 'dc=missing,dc=com' });
+    assert.equal(result.verdict, 'fail');
+    assert.match(result.failure, /^ROOTDSE: namingContexts does not include "dc=missing,dc=com"; the server lists .*"dc=example,dc=com"/);
   });
 
   it('refuses a cleartext bind unless ldapAllowCleartext is set', async () => {
     const result = await run({ ldapAllowCleartext: '' });
     assert.equal(result.verdict, 'fail');
-    assert.match(result.failure, /^Configuration error: refusing to send the bind password/);
+    assert.match(result.failure, /^CONFIG: refusing to send the bind password/);
   });
 
   it('reaches a search pass without the "response corruption" fallback (B2/S1)', async () => {

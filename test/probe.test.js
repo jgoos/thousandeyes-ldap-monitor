@@ -21,7 +21,7 @@ const entry = (size = 300) => ldap.searchEntry(2, DN, { cn: ['monitor'], descrip
  * Start a fake server for `scenario`, run the script against it once, then stop the server.
  * `credentials` are merged over a working default set; `settings` feed test.getSettings().
  */
-async function probe(scenario, { credentials = {}, settings, tls, routes, timeLimitMs, enforceSocketTimeout, stallCleanup } = {}) {
+async function probe(scenario, { credentials = {}, settings, tls, routes, timeLimitMs, env, enforceSocketTimeout, stallCleanup, peerCertificate, failWrite } = {}) {
   const server = await startFakeLdap({ ...scenario, tls });
   const port = tls ? 636 : 389;
   try {
@@ -33,8 +33,10 @@ async function probe(scenario, { credentials = {}, settings, tls, routes, timeLi
       settings,
       enforceSocketTimeout,
       stallCleanup,
+      peerCertificate,
+      failWrite,
       routes: { [`${HOST}:${port}`]: `127.0.0.1:${server.port}`, ...routes?.(server.port) },
-    }, { timeLimitMs });
+    }, { timeLimitMs, env });
     return { ...result, requests: server.requests };
   } finally {
     await server.close();
@@ -47,21 +49,21 @@ describe('configuration checks', () => {
   it('fails before connecting when the bind credentials are missing', async () => {
     const result = await runProbe({ credentials: { ldapHost: HOST, ldapPort: '389' } });
     assert.equal(result.verdict, 'fail');
-    assert.match(result.failure, /Missing credentials/);
+    assert.match(result.failure, /^CONFIG: missing credentials/);
     assert.equal(eventsOf(result, 'connect').length, 0);
   });
 
   it('refuses an empty password instead of sending an unauthenticated bind (RFC 4513 5.1.2)', async () => {
     const result = await runProbe({ credentials: { ldapMonUser: DN, ldapMonPass: '', ldapHost: HOST, ldapPort: '389' } });
     assert.equal(result.verdict, 'fail');
-    assert.match(result.failure, /Missing credentials/);
+    assert.match(result.failure, /^CONFIG: missing credentials/);
     assert.equal(eventsOf(result, 'connect').length, 0);
   });
 
   it('rejects ports other than 389 and 636', async () => {
     const result = await runProbe({ credentials: { ldapMonUser: DN, ldapMonPass: PASSWORD, ldapHost: HOST, ldapPort: '1389' } });
     assert.equal(result.verdict, 'fail');
-    assert.match(result.failure, /Invalid port 1389/);
+    assert.match(result.failure, /^CONFIG: invalid port 1389/);
   });
 
   it('targets the host and port from the test URL (B4)', async () => {
@@ -113,7 +115,7 @@ describe('bind', () => {
     it(`fails with ${name} (${code}) from a short-form BindResponse`, async () => {
       const result = await probe({ bind: () => [ldap.bindResponse(1, code)] }, { credentials: { ldapBindOnly: 'true' } });
       assert.equal(result.verdict, 'fail');
-      assert.match(result.failure, new RegExp(`${name} \\(${code}/`));
+      assert.match(result.failure, new RegExp(`^BIND rc=${code} ${name}: `));
     });
   }
 
@@ -205,10 +207,20 @@ describe('search', () => {
     assert.match(result.failure, /disconnect|unavailable/i);
   });
 
-  it('fails a search slower than slowMs on every response path (B6)', async () => {
-    const result = await probe({ bind: bindOk, search: () => [{ waitMs: 400 }, entry(), ldap.searchDone(2, 0)] });
-    assert.equal(result.verdict, 'fail');
-    assert.match(result.failure, /Slow search/);
+  it('passes a slow bind and search; latency alerts are rules on the markers instead (B25)', async () => {
+    const result = await probe({
+      bind: () => [{ waitMs: 400 }, ...bindOk()],
+      search: () => [{ waitMs: 400 }, entry(), ldap.searchDone(2, 0)],
+    });
+    assert.equal(result.verdict, 'pass', result.failure ?? '');
+    assert.doesNotMatch(result.stdout, /slow/i);
+  });
+
+  // terraform/marker_alerts.tf alerts on these marker names; keep the two in step.
+  it('records the markers the Terraform latency alert rules name (B25)', async () => {
+    const result = await probe({ bind: bindOk, search: () => [ldap.searchDone(2, 0)] });
+    assert.deepEqual(eventsOf(result, 'marker.stop').map((e) => e.name), ['ldap-attempt-1', 'ldap-tcp-connect', 'ldap-bind', 'ldap-search']);
+    assert.equal(eventsOf(result, 'marker.error').length, 0);
   });
 
   it('encodes scope and derefAliases as ENUMERATED (RFC 4511 4.5.1) (B14)', async () => {
@@ -218,8 +230,8 @@ describe('search', () => {
     assert.equal(searchReq.derefAliases.tag, TAG.enumerated);
   });
 
-  it('requests no attributes ("1.1") so no entry data is returned (B16/S3)', async () => {
-    const result = await probe({ bind: bindOk, search: () => [ldap.searchDone(2, 0)] });
+  it('requests no attributes ("1.1") from a configured base DN, so no entry data is returned (B16/S3)', async () => {
+    const result = await probe({ bind: bindOk, search: () => [ldap.searchDone(2, 0)] }, { credentials: { ldapBaseDN: DN } });
     const [searchReq] = requestsOf(result, TAG.searchRequest);
     assert.deepEqual(searchReq.attributes, ['1.1']);
   });
@@ -237,6 +249,196 @@ describe('search', () => {
     const result = await probe({ bind: bindOk }, { credentials: { ldapBindOnly: 'true' } });
     assert.equal(requestsOf(result, TAG.unbindRequest).length, 1);
   });
+});
+
+describe('Root DSE checks', () => {
+  // GeneralizedTime as Active Directory writes it, e.g. "20261016201530.0Z".
+  const generalizedTime = (ms) => new Date(ms).toISOString().replace(/[-:T]/g, '').replace(/\.\d+Z$/, '.0Z');
+  const rootDse = (attributes) => ({ bind: bindOk, search: () => [ldap.searchEntry(2, '', attributes), ldap.searchDone(2, 0)] });
+  const ds389 = { namingContexts: ['dc=example,dc=com', 'o=netscaperoot'], supportedLDAPVersion: ['2', '3'], vendorVersion: ['389-Directory/3.1.1 B2025.001.0000'] };
+  const activeDirectory = (skewMs = 0) => ({
+    namingContexts: ['DC=corp,DC=example,DC=com', 'CN=Configuration,DC=corp,DC=example,DC=com'],
+    supportedLDAPVersion: ['3', '2'],
+    isSynchronized: ['TRUE'],
+    currentTime: [generalizedTime(Date.now() + skewMs)],
+  });
+
+  it('requests the Root DSE attributes it checks', async () => {
+    const result = await probe(rootDse(ds389));
+    const [searchReq] = requestsOf(result, TAG.searchRequest);
+    assert.deepEqual(searchReq.attributes, ['namingContexts', 'supportedLDAPVersion', 'vendorVersion', 'isSynchronized', 'currentTime']);
+  });
+
+  it('reports the server vendorVersion in the PASS summary', async () => {
+    const result = await probe(rootDse(ds389));
+    assert.equal(result.verdict, 'pass', result.failure ?? '');
+    assert.match(result.stdout, /LDAP Monitor: PASS - .*; vendorVersion: 389-Directory\/3\.1\.1 B2025\.001\.0000/);
+  });
+
+  it('passes when ldapExpectedNamingContext is served, ignoring case and spaces', async () => {
+    const result = await probe(rootDse(activeDirectory()), { credentials: { ldapExpectedNamingContext: 'dc=corp, dc=example, dc=com' } });
+    assert.equal(result.verdict, 'pass', result.failure ?? '');
+  });
+
+  it('fails when the expected naming context is not among namingContexts', async () => {
+    const result = await probe(rootDse(ds389), { credentials: { ldapExpectedNamingContext: 'dc=missing,dc=com' } });
+    assert.equal(result.verdict, 'fail');
+    assert.equal(result.failure, 'ROOTDSE: namingContexts does not include "dc=missing,dc=com"; the server lists "dc=example,dc=com", "o=netscaperoot"');
+  });
+
+  it('fails when a naming context is expected but the Root DSE lists none', async () => {
+    const result = await probe(rootDse({ supportedLDAPVersion: ['3'] }), { credentials: { ldapExpectedNamingContext: 'dc=example,dc=com' } });
+    assert.match(result.failure, /^ROOTDSE: the Root DSE lists no namingContexts; expected "dc=example,dc=com"/);
+  });
+
+  it('fails when a naming context is expected but no Root DSE entry is returned', async () => {
+    const result = await probe({ bind: bindOk, search: () => [ldap.searchDone(2, 0)] }, { credentials: { ldapExpectedNamingContext: 'dc=example,dc=com' } });
+    assert.match(result.failure, /^ROOTDSE: the server returned no Root DSE entry; expected namingContexts to include "dc=example,dc=com"/);
+  });
+
+  for (const [what, credentials] of [['a base DN', { ldapBaseDN: 'dc=example,dc=com' }], ['bind-only mode', { ldapBindOnly: 'true' }]]) {
+    it(`rejects ldapExpectedNamingContext with ${what}, before connecting`, async () => {
+      const result = await probe(rootDse(ds389), { credentials: { ldapExpectedNamingContext: 'dc=example,dc=com', ...credentials } });
+      assert.match(result.failure, /^CONFIG: ldapExpectedNamingContext needs the Root DSE search/);
+      assert.equal(eventsOf(result, 'connect').length, 0);
+    });
+  }
+
+  it('fails when the server does not list LDAPv3 in supportedLDAPVersion', async () => {
+    const result = await probe(rootDse({ supportedLDAPVersion: ['2'] }));
+    assert.match(result.failure, /^ROOTDSE: supportedLDAPVersion lists "2" but not 3/);
+  });
+
+  it('passes an Active Directory DC that is synchronized and in time, reporting the clock skew', async () => {
+    const result = await probe(rootDse(activeDirectory(2_000)));
+    assert.equal(result.verdict, 'pass', result.failure ?? '');
+    assert.match(result.stdout, /LDAP Monitor: PASS - .*; clock skew: \+[123] s/);
+  });
+
+  it('fails when an Active Directory DC reports isSynchronized FALSE', async () => {
+    const result = await probe(rootDse({ ...activeDirectory(), isSynchronized: ['FALSE'] }));
+    assert.match(result.failure, /^ROOTDSE: isSynchronized is FALSE: the server reports that it is not fully synchronized/);
+  });
+
+  it('fails when the server clock is more than 300 s off the agent clock', async () => {
+    const result = await probe(rootDse(activeDirectory(-600_000)));
+    assert.match(result.failure, /^ROOTDSE: server clock is (599|600|601) s behind the agent clock \(currentTime \d{14}\.0Z\); the limit is 300 s \(ldapMaxClockSkewSeconds\)$/);
+  });
+
+  it('allows a larger skew with ldapMaxClockSkewSeconds, and none is checked with 0', async () => {
+    for (const limit of ['900', '0']) {
+      const result = await probe(rootDse(activeDirectory(-600_000)), { credentials: { ldapMaxClockSkewSeconds: limit } });
+      assert.equal(result.verdict, 'pass', result.failure ?? '');
+    }
+  });
+
+  it('reports every Root DSE problem in one line', async () => {
+    const result = await probe(rootDse({ ...activeDirectory(900_000), isSynchronized: ['FALSE'] }));
+    assert.match(result.failure, /^ROOTDSE: isSynchronized is FALSE: .*; server clock is \d+ s ahead of the agent clock/);
+  });
+
+  it('ignores a currentTime it cannot parse', async () => {
+    const result = await probe(rootDse({ ...activeDirectory(), currentTime: ['10/16/2026 8:15:30 PM'] }));
+    assert.equal(result.verdict, 'pass', result.failure ?? '');
+    assert.doesNotMatch(result.stdout, /clock skew/);
+  });
+
+  it('rejects an ldapMaxClockSkewSeconds that is not a whole number', async () => {
+    const result = await probe(rootDse(ds389), { credentials: { ldapMaxClockSkewSeconds: '5m' } });
+    assert.match(result.failure, /^CONFIG: ldapMaxClockSkewSeconds must be a whole number/);
+  });
+
+  it('passes a search that returns no entry unless ldapRequireEntry is set', async () => {
+    const scenario = { bind: bindOk, search: () => [ldap.searchDone(2, 0)] };
+    const base = { ldapBaseDN: 'ou=missing,dc=example,dc=com' };
+    assert.equal((await probe(scenario, { credentials: base })).verdict, 'pass');
+    const result = await probe(scenario, { credentials: { ...base, ldapRequireEntry: 'true' } });
+    assert.match(result.failure, /^SEARCH: no entry returned for "ou=missing,dc=example,dc=com"; the base DN may not exist, or the account may not be allowed to read it/);
+  });
+
+  it('does not decode or check entries from a configured base DN', async () => {
+    const result = await probe(rootDse({ supportedLDAPVersion: ['2'] }), { credentials: { ldapBaseDN: 'dc=example,dc=com' } });
+    assert.equal(result.verdict, 'pass', result.failure ?? '');
+  });
+
+  it('compares a hostile namingContexts value quickly (150 000 spaces)', async () => {
+    const started = Date.now();
+    const hostile = `dc=x${' '.repeat(150_000)}y`;
+    const result = await probe(
+      rootDse({ namingContexts: [hostile, 'dc=example,dc=com'] }),
+      { credentials: { ldapExpectedNamingContext: 'dc=other,dc=com' }, settings: { timeout: 5 }, timeLimitMs: 6_000 },
+    );
+    assert.match(result.failure ?? result.verdict, /^ROOTDSE: namingContexts does not include "dc=other,dc=com"/);
+    assert.ok(Date.now() - started < 3_000, 'the comparison must not block the probe');
+  });
+
+  it('does not match a namingContexts value longer than 4 KB', async () => {
+    const result = await probe(
+      rootDse({ namingContexts: [`dc=example,dc=com${' '.repeat(5_000)}`] }),
+      { credentials: { ldapExpectedNamingContext: 'dc=example,dc=com' } },
+    );
+    assert.match(result.failure, /^ROOTDSE: namingContexts does not include "dc=example,dc=com"/);
+  });
+
+  it('keeps spaces next to an escaped separator when comparing DNs', async () => {
+    const scenario = rootDse({ namingContexts: ['OU=R\\, D , DC=example,DC=com'] });
+    const same = await probe(scenario, { credentials: { ldapExpectedNamingContext: 'ou=r\\, d,dc=example,dc=com' } });
+    assert.equal(same.verdict, 'pass', same.failure ?? '');
+    const other = await probe(scenario, { credentials: { ldapExpectedNamingContext: 'ou=r\\,d,dc=example,dc=com' } });
+    assert.match(other.failure, /^ROOTDSE: namingContexts does not include "ou=r\\,d,dc=example,dc=com"/);
+  });
+
+  it('logs only the requested Root DSE attributes in debug mode, so the server cannot forge log lines', async () => {
+    const result = await probe(rootDse({ ...ds389, 'x\nLDAP Monitor: PASS forged': ['v'] }), { credentials: { ldapDebugMode: 'true' } });
+    assert.equal(result.verdict, 'pass', result.failure ?? '');
+    assert.match(result.stdout, /^Debug: Root DSE vendorVersion: "389-Directory\/3\.1\.1 B2025\.001\.0000"$/m);
+    assert.doesNotMatch(result.stdout, /forged/i);
+  });
+
+  // currentTime for the instant `ms`, written with a time zone offset such as "+0130" or "+09".
+  const withOffset = (ms, offset) => {
+    const minutes = (offset[0] === '-' ? -1 : 1) * (Number(offset.slice(1, 3)) * 60 + Number(offset.slice(3) || 0));
+    return generalizedTime(ms + minutes * 60_000).replace(/Z$/, offset);
+  };
+
+  for (const offset of ['+0130', '-0500', '+09']) {
+    it(`reads a currentTime with the time zone offset ${offset} (RFC 4517 3.3.13)`, async () => {
+      const result = await probe(rootDse({ ...activeDirectory(), currentTime: [withOffset(Date.now(), offset)] }));
+      assert.equal(result.verdict, 'pass', result.failure ?? '');
+      assert.match(result.stdout, /; clock skew: [+-][01] s$/m);
+    });
+  }
+
+  for (const offset of ['+2400', '+0160', '+1']) {
+    it(`skips the skew check for a currentTime with the invalid offset ${offset}, saying so in debug mode`, async () => {
+      const result = await probe(
+        rootDse({ ...activeDirectory(), currentTime: [generalizedTime(Date.now()).replace(/Z$/, offset)] }),
+        { credentials: { ldapDebugMode: 'true' } },
+      );
+      assert.equal(result.verdict, 'pass', result.failure ?? '');
+      assert.doesNotMatch(result.stdout, /clock skew:/);
+      assert.match(result.stdout, /^Debug: Root DSE currentTime is not a GeneralizedTime; clock skew not checked$/m);
+    });
+  }
+
+  // A SearchResultEntry for the Root DSE built by hand, to break one part of it at a time.
+  const rawEntry = (...parts) => ldap.message(2, tlv(TAG.searchResultEntry, Buffer.concat(parts)));
+  const emptyDn = tlv(0x04, Buffer.alloc(0));
+  const attribute = (type, ...vals) => tlv(0x30, Buffer.concat([tlv(0x04, Buffer.from(type)), ...vals]));
+  const version3 = tlv(0x04, Buffer.from('3'));
+  for (const [what, entry, reason] of [
+    ['an attribute list in a SET', rawEntry(emptyDn, tlv(0x31, attribute('supportedLDAPVersion', tlv(0x31, version3)))), 'malformed SearchResultEntry'],
+    ['no attribute list', rawEntry(emptyDn), 'malformed SearchResultEntry'],
+    ['an objectName that is not an OCTET STRING', rawEntry(tlv(0x02, Buffer.from([0])), tlv(0x30, Buffer.alloc(0))), 'malformed SearchResultEntry'],
+    ['values in an OCTET STRING', rawEntry(emptyDn, tlv(0x30, attribute('supportedLDAPVersion', tlv(0x04, version3)))), 'malformed attribute in SearchResultEntry'],
+    ['an attribute without values', rawEntry(emptyDn, tlv(0x30, attribute('vendorVersion'))), 'malformed attribute in SearchResultEntry'],
+    ['a value that runs past its attribute', rawEntry(emptyDn, tlv(0x30, tlv(0x30, Buffer.from([0x04, 0x05, 0x61])))), 'truncated element inside tag 0x30'],
+  ]) {
+    it(`fails a Root DSE entry with ${what} as a SEARCH protocol error`, async () => {
+      const result = await probe({ bind: bindOk, search: () => [entry, ldap.searchDone(2, 0)] });
+      assert.equal(result.failure, `SEARCH: ${reason}`);
+    });
+  }
 });
 
 describe('response framing and decoding', () => {
@@ -269,7 +471,7 @@ describe('response framing and decoding', () => {
   it('fails on a response for an unexpected message ID', async () => {
     const result = await probe({ bind: () => [ldap.bindResponse(7, 0)] }, bindOnly);
     assert.equal(result.verdict, 'fail');
-    assert.match(result.failure, /Bind failed: unexpected message ID 7/);
+    assert.match(result.failure, /^BIND: unexpected message ID 7/);
   });
 
   it('fails when the bind is answered with another operation', async () => {
@@ -299,13 +501,13 @@ describe('response framing and decoding', () => {
   it('fails when the server closes the connection before SearchResultDone', async () => {
     const result = await probe({ bind: bindOk, search: () => [entry(), { close: true }] });
     assert.equal(result.verdict, 'fail');
-    assert.match(result.failure, /Search failed: connection closed by the server/);
+    assert.match(result.failure, /^SEARCH: connection closed by the server/);
   });
 
   it('names unknown result codes without guessing', async () => {
     const result = await probe({ bind: () => [ldap.bindResponse(1, 99)] }, bindOnly);
     assert.equal(result.verdict, 'fail');
-    assert.match(result.failure, /Unknown LDAP result code 99 \(0x63\)/);
+    assert.match(result.failure, /^BIND rc=99: Unknown LDAP result code \(0x63\)/);
   });
 
   it('keeps the server diagnosticMessage on one line', async () => {
@@ -324,7 +526,7 @@ describe('response framing and decoding', () => {
     const flood = Buffer.concat(Array.from({ length: 1100 }, () => reference));
     const result = await probe({ bind: bindOk, search: () => [flood, ldap.searchDone(2, 0)] });
     assert.equal(result.verdict, 'fail');
-    assert.match(result.failure, /^Search failed: server sent more than 1000000 bytes/);
+    assert.match(result.failure, /^SEARCH: server sent more than 1000000 bytes/);
   });
 });
 
@@ -409,7 +611,7 @@ describe('target and search base', () => {
   it('reports a configuration error, without connecting, when no server is configured (B23)', async () => {
     const result = await runProbe({ credentials: { ldapMonUser: DN, ldapMonPass: PASSWORD } });
     assert.equal(result.verdict, 'fail');
-    assert.match(result.failure, /^Configuration error: no LDAP server configured/);
+    assert.match(result.failure, /^CONFIG: no LDAP server configured/);
     assert.equal(eventsOf(result, 'connect').length + eventsOf(result, 'connectTls').length, 0);
   });
 
@@ -425,11 +627,72 @@ describe('target and search base', () => {
     it(`rejects the test URL ${url}`, async () => {
       const result = await probeUrl(url);
       assert.equal(result.verdict, 'fail');
-      assert.match(result.failure, /^Configuration error: /);
+      assert.match(result.failure, /^CONFIG: /);
       assert.match(result.failure, reason);
       assert.equal(eventsOf(result, 'connect').length, 0);
     });
   }
+});
+
+describe('failure classes', () => {
+  // Each failure is one line that starts with its class, so alerts and logs can be triaged at a glance.
+  const bindOnly = { credentials: { ldapBindOnly: 'true' } };
+  const unreachable = { ldapMonUser: DN, ldapMonPass: PASSWORD, ldapHost: 'down.test', ldapPort: '389', ldapAllowCleartext: 'true' };
+
+  it('starts a configuration error with CONFIG', async () => {
+    const result = await runProbe({ credentials: { ldapHost: HOST, ldapPort: '389' } });
+    assert.match(result.failure, /^CONFIG: missing credentials/);
+  });
+
+  it('starts a refused connection with TCP, naming the target and attempts', async () => {
+    const result = await runProbe({ credentials: unreachable });
+    assert.match(result.failure, /^TCP: connection to down\.test:389 failed after 3 attempts: connect ECONNREFUSED/);
+  });
+
+  it('starts a bind result code with BIND rc=<code> <name>', async () => {
+    const result = await probe({ bind: () => [ldap.bindResponse(1, 49, { diagnostic: 'data 52e' })] }, bindOnly);
+    assert.match(result.failure, /^BIND rc=49 invalidCredentials: .* - server: "data 52e"$/);
+  });
+
+  it('starts a search result code with SEARCH rc=<code> <name>', async () => {
+    const result = await probe({ bind: bindOk, search: () => [ldap.searchDone(2, 32, { matchedDN: 'dc=example,dc=com' })] });
+    assert.match(result.failure, /^SEARCH rc=32 noSuchObject: .*\(matchedDN: "dc=example,dc=com"\)$/);
+  });
+
+  it('starts a protocol error with the phase it happened in', async () => {
+    const result = await probe({ bind: () => [ldap.bindResponse(7, 0)] }, bindOnly);
+    assert.match(result.failure, /^BIND: unexpected message ID 7 \(expected 1\)/);
+  });
+
+  it('starts a stalled response with TIMEOUT, naming the phase', async () => {
+    const result = await probe({ bind: () => [] }, { ...bindOnly, settings: { timeout: 1 }, timeLimitMs: 5_000 });
+    assert.match(result.failure, /^TIMEOUT: bind: waiting for the server response timed out after \d+ ms$/);
+  });
+
+  it('starts a connect that never completes with TIMEOUT', async () => {
+    const result = await runProbe(
+      { credentials: { ...unreachable, ldapHost: HOST }, settings: { timeout: 1 }, routes: { [`${HOST}:389`]: 'hang' } },
+      { timeLimitMs: 5_000 },
+    );
+    assert.match(result.failure, /^TIMEOUT: connect to ldap\.test:389 timed out after \d+ ms \(attempt 1\)$/);
+  });
+
+  it('starts a stalled search response with TIMEOUT: search', async () => {
+    const result = await probe({ bind: bindOk, search: () => [] }, { settings: { timeout: 1 }, timeLimitMs: 5_000 });
+    assert.match(result.failure, /^TIMEOUT: search: waiting for the server response timed out after \d+ ms$/);
+  });
+
+  for (const phase of ['bind', 'search']) {
+    it(`classes a failed write of the ${phase} request as ${phase.toUpperCase()}`, async () => {
+      const result = await probe({ bind: bindOk, search: () => [ldap.searchDone(2, 0)] }, { failWrite: phase });
+      assert.equal(result.failure, `${phase.toUpperCase()}: write EPIPE`);
+    });
+  }
+
+  it('starts an unsolicited Notice of Disconnection with the phase', async () => {
+    const result = await probe({ bind: bindOk, search: () => [ldap.noticeOfDisconnection(52, 'shutting down'), { close: true }] });
+    assert.match(result.failure, /^SEARCH: server sent a Notice of Disconnection, rc=52 unavailable: .* - server: "shutting down"$/);
+  });
 });
 
 describe('cleartext bind policy (RFC 4513 5.1.3)', () => {
@@ -440,14 +703,14 @@ describe('cleartext bind policy (RFC 4513 5.1.3)', () => {
       routes: { 'ldap.test:389': '127.0.0.1:1' },
     });
     assert.equal(result.verdict, 'fail');
-    assert.match(result.failure, /^Configuration error: refusing to send the bind password to ldap\.test:389 without TLS/);
+    assert.match(result.failure, /^CONFIG: refusing to send the bind password to ldap\.test:389 without TLS/);
     assert.match(result.failure, /ldapAllowCleartext/);
     assert.equal(eventsOf(result, 'connect').length, 0);
   });
 
   it('applies the same policy to port 389 from the credentials', async () => {
     const result = await runProbe({ credentials: { ldapMonUser: DN, ldapMonPass: PASSWORD, ldapHost: HOST, ldapPort: '389' } });
-    assert.match(result.failure, /^Configuration error: refusing to send the bind password/);
+    assert.match(result.failure, /^CONFIG: refusing to send the bind password/);
   });
 
   it('warns and proceeds when ldapAllowCleartext is set', async () => {
@@ -461,7 +724,7 @@ describe('connection failures', () => {
   it('fails after three attempts when the connection is refused', async () => {
     const result = await runProbe({ credentials: { ldapMonUser: DN, ldapMonPass: PASSWORD, ldapHost: 'down.test', ldapPort: '389', ldapAllowCleartext: 'true' } });
     assert.equal(result.verdict, 'fail');
-    assert.match(result.failure, /Connection failed after 3 attempts/);
+    assert.match(result.failure, /^TCP: connection to down\.test:389 failed after 3 attempts/);
   });
 
   it('includes the network error in the failure (B13)', async () => {
@@ -484,7 +747,7 @@ describe('connection failures', () => {
       { timeLimitMs: 5_000 },
     );
     assert.equal(result.verdict, 'fail');
-    assert.match(result.failure, /Connection failed after 1 attempt: connect to ldap\.test:389 timed out after \d+ ms/);
+    assert.match(result.failure, /^TIMEOUT: connect to ldap\.test:389 timed out after \d+ ms \(attempt 1\)/);
   });
 
   it('records each attempt under its own marker and the connect marker once', async () => {
@@ -499,7 +762,7 @@ describe('connection failures', () => {
     const started = Date.now();
     const result = await probe({ bind: () => [] }, { credentials: { ldapBindOnly: 'true' }, settings: { timeout: 2 }, timeLimitMs: 5_000 });
     assert.equal(result.verdict, 'fail');
-    assert.match(result.failure, /^Bind failed: waiting for the server response timed out after \d+ ms/);
+    assert.match(result.failure, /^TIMEOUT: bind: waiting for the server response timed out after \d+ ms/);
     assert.ok(Date.now() - started < 2_000, 'the probe must give up before the 2 s time limit');
   });
 
@@ -510,14 +773,14 @@ describe('connection failures', () => {
       { credentials: { ldapBindOnly: 'true' }, settings: { timeout: 2 }, stallCleanup: true, timeLimitMs: 5_000 },
     );
     assert.equal(result.verdict, 'fail');
-    assert.match(result.failure, /^Bind failed: waiting for the server response timed out/);
+    assert.match(result.failure, /^TIMEOUT: bind: waiting for the server response timed out/);
     assert.ok(Date.now() - started < 2_000, 'cleanup must not run past the 2 s time limit');
   });
 
   it('retries a refused LDAPS connection even when the host name contains a TLS keyword', async () => {
     const result = await runProbe({ credentials: { ldapMonUser: DN, ldapMonPass: PASSWORD, ldapHost: 'tls-certificate-gw.test', ldapPort: '636' } });
     assert.equal(eventsOf(result, 'connectTls').length, 3);
-    assert.match(result.failure, /^Connection failed after 3 attempts: connect ECONNREFUSED/);
+    assert.match(result.failure, /^TCP: connection to tls-certificate-gw\.test:636 failed after 3 attempts: connect ECONNREFUSED/);
   });
 
   it('treats a timeout above the 180 s maximum as milliseconds', async () => {
@@ -555,7 +818,7 @@ describe('LDAPS', () => {
   it('fails when the certificate is not trusted', { skip: skip() }, async () => {
     const result = await tlsProbe({ bind: bindOk }, { credentials: { ldapBindOnly: 'true' } });
     assert.equal(result.verdict, 'fail');
-    assert.match(result.failure, /^TLS handshake with ldap\.test:636 failed: /);
+    assert.match(result.failure, /^TLS: handshake with ldap\.test:636 failed: /);
     assert.match(result.failure, /provide it in the ldapCaBase64 credential/);
   });
 
@@ -617,10 +880,80 @@ describe('LDAPS', () => {
     assert.equal(result.verdict, 'pass', result.failure ?? '');
   });
 
+  describe('certificate expiry warning', () => {
+    // The fixture's server certificate is valid for 2 days, so it is inside the default 30 days.
+    const trusted = (credentials = {}) => ({ ldapBindOnly: 'true', ldapCaBase64: caBase64(), ...credentials });
+
+    it('warns when the certificate expires within ldapCertWarnDays (default 30)', { skip: skip() }, async () => {
+      const result = await tlsProbe({ bind: bindOk }, { credentials: trusted() });
+      assert.equal(result.verdict, 'pass', result.failure ?? '');
+      assert.match(result.stdout, /^Warning: the server certificate \(CN ldap\.test\) expires in 1 day, on \d{4}-\d\d-\d\dT[\d:.]+Z; ldapCertWarnDays is 30$/m);
+      assert.match(result.stdout, /LDAP Monitor: PASS \(Bind-Only\) - .*; certificate expires in 1 day$/m);
+    });
+
+    it('does not warn when the certificate outlives ldapCertWarnDays, or when it is 0', { skip: skip() }, async () => {
+      for (const days of ['1', '0']) {
+        const result = await tlsProbe({ bind: bindOk }, { credentials: trusted({ ldapCertWarnDays: days }) });
+        assert.equal(result.verdict, 'pass', result.failure ?? '');
+        assert.doesNotMatch(result.stdout, /certificate expires/);
+      }
+    });
+
+    for (const [what, peerCertificate] of [
+      ['the runtime has no getPeerCertificate()', 'absent'],
+      ['getPeerCertificate() throws', 'throws'],
+      ['valid_to is missing', { subject: { CN: 'ldap.test' } }],
+      ['valid_to is not a date', { subject: { CN: 'ldap.test' }, valid_to: 'soon' }],
+    ]) {
+      it(`skips the check quietly when ${what}`, { skip: skip() }, async () => {
+        const result = await tlsProbe({ bind: bindOk }, { credentials: trusted(), peerCertificate });
+        assert.equal(result.verdict, 'pass', result.failure ?? '');
+        assert.doesNotMatch(result.stdout, /expires|Warning/);
+        assert.equal(result.stderr, '');
+      });
+    }
+
+    // valid_to as Node writes it, such as "Oct  3 08:00:00 2099 GMT": the day padded with a space.
+    const nodeDate = (ms) => {
+      const [, day, month, year, time] = /^\w+, (\d+) (\w+) (\d+) ([\d:]+) GMT$/.exec(new Date(ms).toUTCString());
+      return `${month} ${String(Number(day)).padStart(2, ' ')} ${time} ${year} GMT`;
+    };
+
+    it('says how long ago an expired certificate expired', { skip: skip() }, async () => {
+      const peerCertificate = { subject: { CN: 'ldap.test' }, valid_to: nodeDate(Date.now() - 3.5 * 86_400_000) };
+      const result = await tlsProbe({ bind: bindOk }, { credentials: trusted(), peerCertificate });
+      assert.match(result.stdout, /^Warning: the server certificate \(CN ldap\.test\) expired 3 days ago, on /m);
+      assert.match(result.stdout, /; certificate expired 3 days ago$/m);
+    });
+
+    it('reads a valid_to without a time zone as GMT, not as agent local time', { skip: skip() }, async () => {
+      for (const validTo of ['Oct  3 08:00:00 2099 GMT', 'Oct  3 08:00:00 2099', '2099-10-03T08:00:00']) {
+        const result = await tlsProbe({ bind: bindOk }, {
+          credentials: trusted({ ldapDebugMode: 'true' }),
+          peerCertificate: { valid_to: validTo },
+          env: { TZ: 'America/New_York' },
+        });
+        assert.match(result.stdout, /^Debug: Server certificate valid until 2099-10-03T08:00:00\.000Z$/m, validTo);
+      }
+    });
+
+    it('rejects an ldapCertWarnDays that is not a whole number', { skip: skip() }, async () => {
+      const result = await tlsProbe({ bind: bindOk }, { credentials: trusted({ ldapCertWarnDays: '-1' }) });
+      assert.match(result.failure, /^CONFIG: ldapCertWarnDays must be a whole number/);
+    });
+  });
+
+  it('reports an empty certificate block in ldapCaBase64 as a configuration error, before connecting', { skip: skip() }, async () => {
+    const empty = '-----BEGIN CERTIFICATE----- -----END CERTIFICATE-----';
+    const result = await tlsProbe({ bind: bindOk }, { credentials: { ldapBindOnly: 'true', ldapCaBase64: empty } });
+    assert.match(result.failure, /^CONFIG: ldapCaBase64 holds an empty certificate block/);
+    assert.equal(eventsOf(result, 'connectTls').length, 0);
+  });
+
   it('reports a CA credential without a certificate as a configuration error, before connecting', { skip: skip() }, async () => {
     const result = await tlsProbe({ bind: bindOk }, { credentials: { ldapBindOnly: 'true', ldapCaBase64: 'bm90IGEgY2VydGlmaWNhdGU=' } });
     assert.equal(result.verdict, 'fail');
-    assert.match(result.failure, /^Configuration error: ldapCaBase64 holds no certificate/);
+    assert.match(result.failure, /^CONFIG: ldapCaBase64 holds no certificate/);
     assert.equal(eventsOf(result, 'connectTls').length, 0);
   });
 });
