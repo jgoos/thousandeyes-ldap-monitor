@@ -36,41 +36,41 @@ def create_architecture():
         # Regional Clusters
         with Cluster("EMEA Region"):
             with Cluster("Enterprise Agents"):
-                emea_agent1 = Client("Agent ag-123456\n(Monitoring Client)")
-                emea_agent2 = Client("Agent ag-123457\n(Monitoring Client)")
+                emea_agent1 = Client("Agent 123456\n(Monitoring Client)")
+                emea_agent2 = Client("Agent 123457\n(Monitoring Client)")
                 emea_agents = [emea_agent1, emea_agent2]
             
             emea_firewall = Firewall("Corporate Firewall\nEMEA")
             
             with Cluster("LDAP Servers"):
-                emea_ldap1 = LDAPService("ldap-emea-01.corp.com\n:636/LDAPS")
-                emea_ldap2 = LDAPService("ldap-emea-02.corp.com\n:636/LDAPS")
+                emea_ldap1 = LDAPService("ldap-emea-01\n.example.com:636")
+                emea_ldap2 = LDAPService("ldap-emea-02\n.example.com:636")
                 emea_ldaps = [emea_ldap1, emea_ldap2]
         
         with Cluster("AMER Region"):
             with Cluster("Enterprise Agents"):
-                amer_agent1 = Client("Agent ag-234567\n(Monitoring Client)")
-                amer_agent2 = Client("Agent ag-234568\n(Monitoring Client)")
+                amer_agent1 = Client("Agent 234567\n(Monitoring Client)")
+                amer_agent2 = Client("Agent 234568\n(Monitoring Client)")
                 amer_agents = [amer_agent1, amer_agent2]
             
             amer_firewall = Firewall("Corporate Firewall\nAMER")
             
             with Cluster("LDAP Servers"):
-                amer_ldap1 = LDAPService("ldap-amer-01.corp.com\n:636/LDAPS")
-                amer_ldap2 = LDAPService("ldap-amer-02.corp.com\n:636/LDAPS")
+                amer_ldap1 = LDAPService("ldap-amer-01\n.example.com:636")
+                amer_ldap2 = LDAPService("ldap-amer-02\n.example.com:636")
                 amer_ldaps = [amer_ldap1, amer_ldap2]
         
         with Cluster("APAC Region"):
             with Cluster("Enterprise Agents"):
-                apac_agent1 = Client("Agent ag-345678\n(Monitoring Client)")
-                apac_agent2 = Client("Agent ag-345679\n(Monitoring Client)")
+                apac_agent1 = Client("Agent 345678\n(Monitoring Client)")
+                apac_agent2 = Client("Agent 345679\n(Monitoring Client)")
                 apac_agents = [apac_agent1, apac_agent2]
             
             apac_firewall = Firewall("Corporate Firewall\nAPAC")
             
             with Cluster("LDAP Servers"):
-                apac_ldap1 = LDAPService("ldap-apac-01.corp.com\n:636/LDAPS")
-                apac_ldap2 = LDAPService("ldap-apac-02.corp.com\n:636/LDAPS")
+                apac_ldap1 = LDAPService("ldap-apac-01\n.example.com:636")
+                apac_ldap2 = LDAPService("ldap-apac-02\n.example.com:636")
                 apac_ldaps = [apac_ldap1, apac_ldap2]
         
         # Control plane connections

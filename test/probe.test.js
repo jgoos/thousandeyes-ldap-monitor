@@ -66,6 +66,28 @@ describe('configuration checks', () => {
     assert.match(result.failure, /^CONFIG: invalid port 1389/);
   });
 
+  for (const [ldapPort, reason] of [
+    ['abc', /^CONFIG: ldapPort must be a whole number, not "abc"/],
+    ['389x', /^CONFIG: ldapPort must be a whole number, not "389x"/],
+    ['0', /^CONFIG: invalid port 0 in the ldapPort credential/],
+    ['70000', /^CONFIG: invalid port 70000 in the ldapPort credential/],
+  ]) {
+    it(`rejects the ldapPort credential "${ldapPort}" without connecting`, async () => {
+      const result = await runProbe({ credentials: { ldapMonUser: DN, ldapMonPass: PASSWORD, ldapHost: HOST, ldapPort, ldapAllowCleartext: 'true' } });
+      assert.equal(result.verdict, 'fail');
+      assert.match(result.failure, reason);
+      assert.equal(eventsOf(result, 'connect').length + eventsOf(result, 'connectTls').length, 0);
+    });
+  }
+
+  for (const [ldapPort, kind] of [['389', 'connect'], ['636', 'connectTls']]) {
+    it(`connects to the ldapPort credential "${ldapPort}"`, async () => {
+      const result = await runProbe({ credentials: { ldapMonUser: DN, ldapMonPass: PASSWORD, ldapHost: 'nowhere.test', ldapPort, ldapAllowCleartext: 'true' } });
+      assert.doesNotMatch(result.failure, /^CONFIG: /);
+      assert.equal(eventsOf(result, kind)[0].port, Number(ldapPort));
+    });
+  }
+
   it('targets the host and port from the test URL (B4)', async () => {
     const server = await startFakeLdap({ bind: bindOk });
     try {

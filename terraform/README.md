@@ -1,6 +1,6 @@
 # ThousandEyes LDAP Monitoring Terraform Module
 
-This directory contains Terraform configuration that automates LDAP monitoring with ThousandEyes. It deploys one transaction test per LDAP server, running `ldap-monitor.js`, with an alert rule for failed or timed-out runs and latency alert rules for slow steps. It also creates a role and an account group for monitoring administration.
+This directory contains Terraform configuration that automates LDAP monitoring with ThousandEyes. It deploys one transaction test per LDAP server, running `ldap-monitor.js`, with an alert rule for failed or timed-out runs and latency alert rules for slow steps. It can also create a least-privilege role and a dedicated monitoring user (opt-in).
 
 Each test's URL is an LDAP URL (RFC 4516), such as `ldaps://dc1.example.com:636/` or `ldaps://dc1.example.com:3269/DC=example,DC=com`. The script reads its target from the URL, so every test monitors its own server.
 

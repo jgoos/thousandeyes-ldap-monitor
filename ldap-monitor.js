@@ -53,7 +53,6 @@ import { net, credentials, test, markers } from 'thousandeyes';
 // Constants
 const MAX_RESPONSE_SIZE = 1000000; // 1MB safety limit for everything the server sends on one connection
 const TLS_ERROR_KEYWORDS = ['certificate', 'CERT_', 'SSL', 'TLS'];
-const CREDENTIAL_ALTERNATIVES = ['ldapbasedn', 'LdapBaseDN', 'LDAPBASEDN', 'ldap_base_dn', 'LDAP_BASE_DN'];
 const TLS_ERROR_CODE = /^(ERR_TLS_|ERR_SSL_|CERT_|UNABLE_TO_|DEPTH_ZERO_|SELF_SIGNED_)/;
 const NETWORK_ERROR_CODE = /^(ECONN|ETIMEDOUT|EHOST|ENET|ENOTFOUND|EAI_|EPIPE)/;
 const DEFAULT_TEST_TIMEOUT_S = 30; // ThousandEyes default transaction time limit
@@ -467,6 +466,9 @@ function withTimeout(promise, ms, what, onLateValue) {
   return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
 
+/** Resolve after `ms`. */
+const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
 /** Error message with its code, when the message does not already include it. */
 const describeError = (err) => {
   const message = err && err.message || 'Unknown error';
@@ -779,7 +781,8 @@ function parseLdapUrl(url) {
  * URL's DN when the URL has a "/" path (an empty DN there is the Root DSE), else the ldapBaseDN
  * credential, else the Root DSE ("").
  * @returns {{ host: string, port: number, tls: boolean, baseDN: string, source: string }}
- * @throws {Error} a configuration error when no server is configured or the URL is malformed
+ * @throws {Error} a configuration error when no server is configured, the URL is malformed, or
+ *   ldapPort is not 389 or 636 (an ldapPort that is not a whole number included)
  */
 function resolveTarget({ testUrl, ldapHost, ldapPort, ldapBaseDN }) {
   const fromUrl = parseLdapUrl(testUrl);
@@ -789,7 +792,7 @@ function resolveTarget({ testUrl, ldapHost, ldapPort, ldapBaseDN }) {
   if (!host) {
     throw configError('no LDAP server configured. Set the test URL to ldaps://<host> (or ldap://<host>:389), or set the ldapHost credential');
   }
-  const port = parseInt(ldapPort, 10) || 636;
+  const port = wholeNumberSetting('ldapPort', ldapPort, 636);
   if (port !== 389 && port !== 636) {
     throw configError(`invalid port ${port} in the ldapPort credential: must be 389 (LDAP) or 636 (LDAPS); use an ldap:// or ldaps:// test URL for other ports`);
   }
@@ -832,18 +835,7 @@ const getTestConfig = () => {
   // Read credentials directly here where they're used
   const ldapHost = getCredential('ldapHost');
   const ldapPort = getCredential('ldapPort');
-  let ldapBaseDN = getCredential('ldapBaseDN');
-  
-  // Try alternative credential names if standard approach fails
-  if (!ldapBaseDN) {
-    for (const altName of CREDENTIAL_ALTERNATIVES) {
-      const altResult = getCredential(altName);
-      if (altResult) {
-        ldapBaseDN = altResult;
-        break;
-      }
-    }
-  }
+  const ldapBaseDN = getCredential('ldapBaseDN');
 
   // Configuration with secure credentials and sensible defaults
   return {
@@ -962,48 +954,6 @@ async function runTest() {
     }
   };
 
-  /**
-   * Create a delay promise in a TypeScript-safe way
-   * @param {number} delayMs - Delay in milliseconds
-   * @returns {Promise} Promise that resolves after the delay
-   */
-  const createDelay = (delayMs) => {
-    return new Promise(resolve => {
-      try {
-        // Try different timer approaches for maximum compatibility
-        if (globalThis && 'setTimeout' in globalThis) {
-          const setTimeoutMethod = globalThis.setTimeout;
-          if (typeof setTimeoutMethod === 'function') {
-            setTimeoutMethod(resolve, delayMs);
-            return;
-          }
-        }
-        
-        // Fallback to global setTimeout if available
-        if (typeof setTimeout === 'function') {
-          setTimeout(resolve, delayMs);
-          return;
-        }
-        
-        // Try setImmediate for faster retry if setTimeout unavailable
-        if (globalThis && 'setImmediate' in globalThis) {
-          const setImmediateMethod = globalThis.setImmediate;
-          if (typeof setImmediateMethod === 'function') {
-            setImmediateMethod(resolve);
-            return;
-          }
-        }
-        
-        // Last resort: immediate resolution
-        resolve();
-        
-      } catch {
-        // If any timer approach fails, resolve immediately
-        resolve();
-      }
-    });
-  };
-
   // Notes for the PASS summary, such as a certificate that expires soon or the server version.
   const facts = [];
 
@@ -1073,7 +1023,7 @@ async function runTest() {
         if (err && err.code === 'ETIMEDOUT') throw failure('TIMEOUT', `${err.message} (attempt ${attempt})`, err);
         throw failure('TCP', `connection to ${hostPort(host, port)} failed after ${attempt} attempt${attempt === 1 ? '' : 's'}: ${describeError(err)}`, err);
       }
-      await createDelay(retryDelayMs);
+      await delay(retryDelayMs);
     }
   }
   stopMarker(connectMarkerName);
@@ -1095,18 +1045,6 @@ async function runTest() {
   // The time budget bounds every wait; the socket idle timeout, where supported, is a backstop.
   if (typeof sock.setTimeout === 'function') {
     sock.setTimeout(timeoutMs);
-  }
-
-  // Set test variable defensively for TypeScript compatibility
-  if (test && 'setVariable' in test) {
-    try {
-      const setVariableMethod = test['setVariable']; // Use bracket notation for TypeScript compatibility
-      if (typeof setVariableMethod === 'function') {
-        setVariableMethod.call(test, 'retries', attempt - 1);
-      }
-    } catch {
-      // Ignore if setVariable fails
-    }
   }
 
   const nextMessage = createLdapMessageReader(sock, remainingMs);

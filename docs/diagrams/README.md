@@ -21,6 +21,7 @@ diagrams/
 │   ├── monitoring_timeline.png
 │   └── firewall_rules.png
 ├── ldap_monitoring.py       # Diagram generator
+├── requirements.txt         # Python dependencies, installed by the Makefile
 ├── Makefile                 # Easy commands
 └── README.md               # This file
 ```
@@ -107,15 +108,15 @@ This removes:
 ## 🔧 Technical Details
 
 ### Dependencies
-- Python 3.7+
+- Python 3.9+ (the floor of `requirements.txt`: `pillow>=11.0.0` needs 3.9)
 - `diagrams` library
 - `graphviz` system package
 - `pillow` for image processing
 
 ### Virtual Environment
 The Makefile automatically:
-- Creates/updates virtual environment
-- Installs required dependencies
+- Creates/updates virtual environment (`venv/`, ignored by git)
+- Installs required dependencies from `requirements.txt`
 - Activates environment for generation
 
 ### Icon Sources

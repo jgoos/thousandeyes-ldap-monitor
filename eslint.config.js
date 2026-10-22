@@ -11,11 +11,4 @@ export default [
       globals: { ...globals.node },
     },
   },
-  {
-    // ldapBaseDN is read but not used yet (audit B17); a warning until the config change fixes it.
-    files: ['ldap-monitor.js'],
-    rules: {
-      'no-unused-vars': 'warn',
-    },
-  },
 ];
