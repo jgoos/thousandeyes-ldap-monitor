@@ -23,6 +23,12 @@ import { net, credentials, test, markers } from 'thousandeyes';
 const MAX_RESPONSE_SIZE = 1000000; // 1MB safety limit for everything the server sends on one connection
 const TLS_ERROR_KEYWORDS = ['certificate', 'CERT_', 'SSL', 'TLS'];
 const CREDENTIAL_ALTERNATIVES = ['ldapbasedn', 'LdapBaseDN', 'LDAPBASEDN', 'ldap_base_dn', 'LDAP_BASE_DN'];
+const TLS_ERROR_CODE = /^(ERR_TLS_|ERR_SSL_|CERT_|UNABLE_TO_|DEPTH_ZERO_|SELF_SIGNED_)/;
+const NETWORK_ERROR_CODE = /^(ECONN|ETIMEDOUT|EHOST|ENET|ENOTFOUND|EAI_|EPIPE)/;
+const DEFAULT_TEST_TIMEOUT_S = 30; // ThousandEyes default transaction time limit
+const MAX_TEST_TIMEOUT_S = 180; // ThousandEyes maximum transaction time limit
+const MIN_TIME_MARGIN_MS = 1000; // left before the time limit for reporting
+const CLEANUP_TIMEOUT_MS = 1000; // most that Unbind and socket close may take together
 const MAX_EMPTY_READS = 3; // consecutive empty reads treated as end of stream
 const MAX_DIAGNOSTIC_LENGTH = 200; // characters of server diagnosticMessage kept in errors
 
@@ -293,9 +299,10 @@ function decodeLdapResult({ pdu, op }) {
  * and splits reads that hold several messages (RFC 4511 5.2: messages are framed only by their
  * BER length).
  * @param {{ read: () => Promise<Buffer|null> }} sock
+ * @param {() => number} remainingMs - time left in the probe budget; a read waits no longer
  * @returns {() => Promise<ReturnType<typeof decodeLdapMessage>>}
  */
-function createLdapMessageReader(sock) {
+function createLdapMessageReader(sock, remainingMs) {
   let buffered = Buffer.alloc(0);
   let received = 0; // every byte on the connection, so many small messages cannot evade the limit
   let emptyReads = 0;
@@ -310,7 +317,7 @@ function createLdapMessageReader(sock) {
         buffered = buffered.subarray(element.end);
         return decodeLdapMessage(pdu);
       }
-      const chunk = await sock.read();
+      const chunk = await withTimeout(sock.read(), remainingMs(), 'waiting for the server response');
       if (!chunk || chunk.length === 0) {
         if (!chunk || ++emptyReads >= MAX_EMPTY_READS) throw new Error('connection closed by the server');
         continue;
@@ -347,6 +354,114 @@ async function inPhase(phase, step) {
   }
 }
 
+/* ───────────── Time budget, transport and TLS helpers ───────────── */
+
+/**
+ * The test time limit in milliseconds. ThousandEyes reports `timeout` in seconds (its sample
+ * script computes `settings.timeout / 2 * 1000`); a value above the 180-second maximum can only
+ * be milliseconds already.
+ * @param {unknown} timeout - test.getSettings().timeout
+ * @returns {number}
+ */
+const testTimeLimitMs = (timeout) => {
+  const value = Number(timeout);
+  if (!Number.isFinite(value) || value <= 0) return DEFAULT_TEST_TIMEOUT_S * 1000;
+  return value <= MAX_TEST_TIMEOUT_S ? value * 1000 : value;
+};
+
+/**
+ * Time the probe may use, leaving a margin before ThousandEyes ends the transaction so that the
+ * probe's own, more specific, timeout error is reported instead of a generic one.
+ * @param {number} timeLimitMs
+ * @returns {number}
+ */
+const probeBudgetMs = (timeLimitMs) =>
+  timeLimitMs - Math.min(Math.max(MIN_TIME_MARGIN_MS, timeLimitMs * 0.1), timeLimitMs / 2);
+
+/**
+ * Settle like `promise`, or reject with an ETIMEDOUT error after `ms`.
+ * @param {Promise<T>} promise
+ * @param {number} ms
+ * @param {string} what - described in the error, e.g. "connect to ldap.example.com:636"
+ * @param {(value: T) => void} [onLateValue] - receives a value that arrives after the timeout,
+ *   such as a socket that must still be closed
+ * @returns {Promise<T>}
+ * @template T
+ */
+function withTimeout(promise, ms, what, onLateValue) {
+  const limit = Math.max(0, Math.round(ms));
+  let timer;
+  let timedOut = false;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      timedOut = true;
+      reject(Object.assign(new Error(`${what} timed out after ${limit} ms`), { code: 'ETIMEDOUT' }));
+    }, limit);
+  });
+  if (onLateValue) promise.then((value) => { if (timedOut) onLateValue(value); }, () => {});
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
+/** Error message with its code, when the message does not already include it. */
+const describeError = (err) => {
+  const message = err && err.message || 'Unknown error';
+  return err && err.code && !message.includes(err.code) ? `${message} (${err.code})` : message;
+};
+
+/**
+ * Whether a connect error came from TLS rather than from the network. The error code decides when
+ * there is one; otherwise the message is checked for TLS keywords with the host name removed, so
+ * a host such as "certificate-gw.example.com" does not make a network error look like TLS.
+ * @param {Error & { code?: string }} err
+ * @param {string} host
+ */
+const isTlsError = (err, host) => {
+  const code = err && err.code || '';
+  if (TLS_ERROR_CODE.test(code)) return true;
+  if (NETWORK_ERROR_CODE.test(code)) return false;
+  const message = (err && err.message || '').split(host).join('');
+  return TLS_ERROR_KEYWORDS.some((keyword) => message.includes(keyword));
+};
+
+/** IPv4 or IPv6 literal. TLS SNI must not carry an IP address (RFC 6066 section 3). */
+const isIpAddress = (host) => /^\d{1,3}(\.\d{1,3}){3}$/.test(host) || host.includes(':');
+
+/**
+ * CA certificates from the ldapCaBase64 credential, which may hold PEM text or base64-encoded
+ * PEM. Line breaks are restored, since a credential field may have turned them into spaces.
+ * @param {string} value
+ * @returns {string[]} one PEM block per certificate
+ * @throws {Error} a configuration error when no certificate is found
+ */
+function parseCaCertificates(value) {
+  const text = String(value).trim();
+  const pem = text.includes('-----BEGIN') ? text : Buffer.from(text, 'base64').toString('utf8');
+  const blocks = pem.match(/-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICATE-----/g);
+  if (!blocks) {
+    throw new Error('Configuration error: ldapCaBase64 holds no certificate; expected PEM text ("-----BEGIN CERTIFICATE-----"), as-is or base64-encoded');
+  }
+  return blocks.map((block) => {
+    const body = block.replace(/-----(BEGIN|END) CERTIFICATE-----/g, '').replace(/\s+/g, '');
+    return `-----BEGIN CERTIFICATE-----\n${body.match(/.{1,64}/g).join('\n')}\n-----END CERTIFICATE-----\n`;
+  });
+}
+
+/** Start or stop a ThousandEyes marker; a marker error is logged, never fatal. */
+const startMarker = (name) => {
+  try {
+    markers.start(name);
+  } catch (err) {
+    console.log(`Warning: could not start marker ${name}: ${describeError(err)}`);
+  }
+};
+const stopMarker = (name) => {
+  try {
+    markers.stop(name);
+  } catch (err) {
+    console.log(`Warning: could not stop marker ${name}: ${describeError(err)}`);
+  }
+};
+
 /**
  * Get configuration from secure credentials with fallback defaults
  * Uses secure credentials for configuration since testVars are not available
@@ -364,7 +479,7 @@ const getTestConfig = () => {
           testTimeout = settings.timeout;
         }
       }
-    } catch (e) {
+    } catch {
       // Ignore if getSettings fails
     }
   }
@@ -373,7 +488,7 @@ const getTestConfig = () => {
   const getCredential = (name) => {
     try {
       return credentials.get(name);
-    } catch (err) {
+    } catch {
       return null;
     }
   };
@@ -409,7 +524,7 @@ const getTestConfig = () => {
   return {
     host: ldapHost || 'ldap.example.com',
     port: parseInt(ldapPort) || 636,
-    timeoutMs: testTimeout || 5000,
+    timeoutMs: testTimeLimitMs(testTimeout),
     slowMs: 300,
     baseDN: ldapBaseDN || 'USE_BIND_DN',
     retryDelayMs: 100,
@@ -420,6 +535,9 @@ const getTestConfig = () => {
 };
 
 async function runTest() {
+  // The time budget starts now: every network wait below is bounded by what is left of it.
+  const probeStart = Date.now();
+
   // Get configuration from credentials and defaults
   const cfg = getTestConfig();
 
@@ -440,7 +558,7 @@ async function runTest() {
   const getCredential = (name) => {
     try {
       return credentials.get(name);
-    } catch (err) {
+    } catch {
       return null;
     }
   };
@@ -478,6 +596,9 @@ async function runTest() {
     throw new Error('Invalid slowMs threshold: must be greater than 0');
   }
 
+  const deadline = probeStart + probeBudgetMs(timeoutMs);
+  const remainingMs = () => deadline - Date.now();
+
 
   /* --------- TLS information logging (defensive for TypeScript) --------- */
   /**
@@ -497,7 +618,7 @@ async function runTest() {
           if (typeof getCipherMethod === 'function') {
             cipher = getCipherMethod.call(socket);
           }
-        } catch (e) {
+        } catch {
           // Ignore cipher access errors
         }
       }
@@ -512,7 +633,7 @@ async function runTest() {
               cn = cert.subject.CN;
             }
           }
-        } catch (e) {
+        } catch {
           // Ignore certificate access errors
         }
       }
@@ -521,7 +642,7 @@ async function runTest() {
       const commonName = cn || 'unknown';
       console.log(`TLS cipher: ${cipherName}; peer CN: ${commonName}`);
       
-    } catch (error) {
+    } catch {
       // If anything fails, just log basic TLS connection info
       console.log('TLS connection established');
     }
@@ -562,16 +683,11 @@ async function runTest() {
         // Last resort: immediate resolution
         resolve();
         
-      } catch (error) {
+      } catch {
         // If any timer approach fails, resolve immediately
         resolve();
       }
     });
-  };
-
-  // Check if error message indicates TLS/certificate issues
-  const isTlsError = (errorMsg) => {
-    return TLS_ERROR_KEYWORDS.some(keyword => errorMsg.includes(keyword));
   };
 
   /* Performance metrics collector */
@@ -584,126 +700,73 @@ async function runTest() {
     searchEnd: null
   };
 
+  /* 1 ▸ Open the socket (TLS on port 636) */
+  // Certificate problems and bad CA configuration will not go away on retry, so they fail at once;
+  // other connect errors are retried while the time budget allows.
+  let tlsOptions;
+  if (port === 636) {
+    tlsOptions = { minVersion: tlsMinVersion, rejectUnauthorized: true };
+    if (!isIpAddress(host)) tlsOptions.servername = host;
+    if (caBase64) {
+      tlsOptions.ca = parseCaCertificates(caBase64);
+      if (debugMode) {
+        console.log(`Debug: Using ${tlsOptions.ca.length} custom CA certificate(s) for LDAPS connection`);
+      }
+    } else if (debugMode) {
+      console.log('Debug: Using system CA certificates');
+    }
+    console.log(`Establishing LDAPS connection with ${caBase64 ? 'custom CA certificate' : 'system CA certificates'}`);
+  }
+
+  // ThousandEyes rejects restarting a marker, so the connect marker spans all attempts and each
+  // attempt has its own marker.
+  const connectMarkerName = port === 636 ? 'ldaps-ssl-handshake' : 'ldap-tcp-connect';
+  const closeQuietly = (lateSocket) => {
+    try {
+      if (lateSocket && typeof lateSocket.end === 'function') lateSocket.end();
+    } catch {
+      // Nothing to report for a socket nobody uses
+    }
+  };
   let sock;
   let attempt = 0;
-
-  /* Retry loop for transient failures */
-  while (attempt <= maxRetries) {
-    const connectMarkerName = port === 636 ? 'ldaps-ssl-handshake' : 'ldap-tcp-connect';
-    markers.start(`ldap-attempt-${attempt + 1}`);
-    let connectMarkerStarted = false;
+  for (;;) {
+    attempt++;
+    startMarker(`ldap-attempt-${attempt}`);
+    if (attempt === 1) startMarker(connectMarkerName);
+    metrics.connectionStart = Date.now();
     try {
-      /* 1 ▸ open socket (TLS if port 636) */
-      metrics.connectionStart = Date.now();
-      markers.start(connectMarkerName);
-      connectMarkerStarted = true;
-      
-      if (port === 636) {
-        console.log(`Establishing LDAPS connection with ${caBase64 ? 'custom CA certificate' : 'system CA certificates'}`);
-      }
-      
-      let connectPromise;
-      if (port === 636) {
-        const tlsOptions = {
-              minVersion: tlsMinVersion,
-              rejectUnauthorized: true,
-              servername: host
-        };
-        
-        // Add CA certificate if provided
-        if (caBase64) {
-          try {
-            // Decode base64 to PEM format
-            console.log('Decoding base64 CA certificate...');
-            const pemCertificate = Buffer.from(caBase64.trim(), 'base64').toString('utf8');
-            console.log(`Decoded certificate length: ${pemCertificate.length} characters`);
-            
-            // Normalize line endings and validate PEM format
-            const normalizedPem = pemCertificate.replace(/\r\n/g, '\n').trim();
-            
-            if (!normalizedPem.includes('-----BEGIN CERTIFICATE-----')) {
-              throw new Error('Decoded certificate is not in valid PEM format (missing -----BEGIN CERTIFICATE-----)');
-            }
-            
-            // Extract all certificates from the PEM data (handles certificate chains)
-            const certRegex = /-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICATE-----/g;
-            const certificates = normalizedPem.match(certRegex);
-            
-            if (!certificates || certificates.length === 0) {
-              throw new Error('No valid certificates found in decoded PEM data');
-            }
-            
-            // Convert each certificate to Buffer
-            const caBuffers = certificates.map(cert => Buffer.from(cert.trim(), 'utf8'));
-            tlsOptions.ca = caBuffers;
-            
-            if (debugMode) {
-              console.log(`Debug: Using ${caBuffers.length} custom CA certificate(s) for LDAPS connection`);
-            }
-            
-          } catch (caError) {
-            throw new Error(`CA certificate processing failed: ${caError.message}`);
-          }
-        } else if (debugMode) {
-          console.log('Debug: Using system CA certificates');
-        }
-        
-        connectPromise = net.connectTls(port, host, tlsOptions);
-      } else {
-        connectPromise = net.connect(port, host);
-      }
-
-      // Create connection with timeout
-      const socketResult = await connectPromise;
-      
-      // Ensure socket has required methods
-      if (!socketResult || typeof socketResult.setTimeout !== 'function') {
-        throw new Error('Invalid socket object received');
-      }
-      
-      sock = socketResult;
-      sock.setTimeout(timeoutMs);
+      const connecting = port === 636 ? net.connectTls(port, host, tlsOptions) : net.connect(port, host);
+      sock = await withTimeout(connecting, remainingMs(), `connect to ${host}:${port}`, closeQuietly);
       metrics.connectionEnd = Date.now();
-      markers.stop(connectMarkerName);
-      connectMarkerStarted = false;
-
-      // Log TLS information if available (defensive handling for TypeScript compatibility)
-      if (port === 636) {
-        logTLSInfo(sock);
-      }
-
-      // Connection successful (details in final summary)
-      markers.stop(`ldap-attempt-${attempt + 1}`);
-      break; // Success, exit retry loop
+      stopMarker(`ldap-attempt-${attempt}`);
+      break;
     } catch (err) {
-      if (connectMarkerStarted) {
-        markers.stop(connectMarkerName);
+      stopMarker(`ldap-attempt-${attempt}`);
+      const tlsFailure = port === 636 && isTlsError(err, host);
+      console.log(`${tlsFailure ? 'Certificate/TLS error on attempt' : 'Connection attempt'} ${attempt}${tlsFailure ? '' : ' failed'}: ${describeError(err)}`);
+
+      if (tlsFailure) {
+        stopMarker(connectMarkerName);
+        const hint = caBase64 ? '' : '. If the server certificate comes from a private CA, provide it in the ldapCaBase64 credential';
+        throw new Error(`TLS handshake with ${host}:${port} failed: ${describeError(err)}${hint}`, { cause: err });
       }
-      markers.stop(`ldap-attempt-${attempt + 1}`);
-      
-      // Enhanced error logging for certificate issues
-      const errorMsg = err && err.message || 'Unknown error';
-      if (isTlsError(errorMsg)) {
-        console.log(`Certificate/TLS error on attempt ${attempt + 1}`);
-        if (!caBase64 && port === 636) {
-          console.log('Hint: Consider providing ldapCaBase64 credential for self-signed certificates');
-        }
-      } else {
-        console.log(`Connection attempt ${attempt + 1} failed`);
+      if (attempt > maxRetries || remainingMs() <= retryDelayMs) {
+        stopMarker(connectMarkerName);
+        throw new Error(`Connection failed after ${attempt} attempt${attempt === 1 ? '' : 's'}: ${describeError(err)}`, { cause: err });
       }
-      
-      attempt++;
-      if (attempt > maxRetries) {
-        // Provide more specific error message for certificate issues
-        if (isTlsError(errorMsg)) {
-          throw new Error(`TLS/Certificate validation failed after ${maxRetries + 1} attempts. ${!caBase64 && port === 636 ? 'Consider providing ldapCaBase64 credential (base64-encoded) for self-signed certificates.' : ''}`);
-        }
-        throw new Error(`Connection failed after ${maxRetries + 1} attempts`);
-      }
-      
-      // Use defensive delay mechanism
       await createDelay(retryDelayMs);
     }
+  }
+  stopMarker(connectMarkerName);
+
+  if (port === 636) {
+    logTLSInfo(sock);
+  }
+
+  // The time budget bounds every wait; the socket idle timeout, where supported, is a backstop.
+  if (typeof sock.setTimeout === 'function') {
+    sock.setTimeout(timeoutMs);
   }
 
   // Set test variable defensively for TypeScript compatibility
@@ -711,19 +774,14 @@ async function runTest() {
     try {
       const setVariableMethod = test['setVariable']; // Use bracket notation for TypeScript compatibility
       if (typeof setVariableMethod === 'function') {
-        setVariableMethod.call(test, 'retries', attempt);
+        setVariableMethod.call(test, 'retries', attempt - 1);
       }
-    } catch (e) {
+    } catch {
       // Ignore if setVariable fails
     }
   }
 
-  // Ensure socket is available for LDAP operations
-  if (!sock) {
-    throw new Error('Socket not available after connection attempts');
-  }
-
-  const nextMessage = createLdapMessageReader(sock);
+  const nextMessage = createLdapMessageReader(sock, remainingMs);
 
   try {
     /* 2 ▸ LDAPv3 simple bind (messageID 1) */
@@ -837,17 +895,22 @@ async function runTest() {
     console.log(`LDAP Monitor: PASS - Total ${totalTime}ms (connect: ${connectionTime}ms, bind: ${bindRTT}ms, search: ${searchRTT}ms)`);
 
   } finally {
-    /* End the LDAP session (RFC 4511 4.3), then close the socket */
+    /* End the LDAP session (RFC 4511 4.3), then close the socket. Both share one short window:
+       at most CLEANUP_TIMEOUT_MS and half the time left before ThousandEyes ends the transaction,
+       so cleanup cannot push the result past the time limit. */
+    const timeLeftMs = probeStart + timeoutMs - Date.now();
+    const cleanupDeadline = Date.now() + Math.min(CLEANUP_TIMEOUT_MS, Math.max(0, timeLeftMs / 2));
+    const cleanupLeftMs = () => cleanupDeadline - Date.now();
     try {
-      await sock.writeAll(ldapMessage(MESSAGE_ID.unbind, unbindRequest()));
+      await withTimeout(sock.writeAll(ldapMessage(MESSAGE_ID.unbind, unbindRequest())), cleanupLeftMs(), 'Unbind');
     } catch {
       // The server may already have closed the connection
     }
-    if (sock && typeof sock.end === 'function') {
+    if (typeof sock.end === 'function') {
       try {
-        await sock.end();
+        await withTimeout(Promise.resolve(sock.end()), cleanupLeftMs(), 'closing the socket');
       } catch (closeErr) {
-        console.error(`Error closing socket: ${closeErr && closeErr.message || 'Unknown error'}`);
+        console.error(`Error closing socket: ${describeError(closeErr)}`);
       }
     }
   }

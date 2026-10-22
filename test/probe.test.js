@@ -21,7 +21,7 @@ const entry = (size = 300) => ldap.searchEntry(2, DN, { cn: ['monitor'], descrip
  * Start a fake server for `scenario`, run the script against it once, then stop the server.
  * `credentials` are merged over a working default set; `settings` feed test.getSettings().
  */
-async function probe(scenario, { credentials = {}, settings, tls, routes, timeLimitMs, enforceSocketTimeout } = {}) {
+async function probe(scenario, { credentials = {}, settings, tls, routes, timeLimitMs, enforceSocketTimeout, stallCleanup } = {}) {
   const server = await startFakeLdap({ ...scenario, tls });
   const port = tls ? 636 : 389;
   try {
@@ -31,6 +31,7 @@ async function probe(scenario, { credentials = {}, settings, tls, routes, timeLi
       },
       settings,
       enforceSocketTimeout,
+      stallCleanup,
       routes: { [`${HOST}:${port}`]: `127.0.0.1:${server.port}`, ...routes?.(server.port) },
     }, { timeLimitMs });
     return { ...result, requests: server.requests };
@@ -76,7 +77,7 @@ describe('configuration checks', () => {
     }
   });
 
-  it('converts the test timeout from seconds to milliseconds (B7)', { todo: 'B7: seconds used as milliseconds' }, async () => {
+  it('converts the test timeout from seconds to milliseconds (B7)', async () => {
     const result = await probe({ bind: bindOk }, { credentials: { ldapBindOnly: 'true' }, settings: { timeout: 30 } });
     assert.deepEqual(eventsOf(result, 'setTimeout').map((e) => e.value), [30_000]);
   });
@@ -333,17 +334,17 @@ describe('connection failures', () => {
     assert.match(result.failure, /Connection failed after 3 attempts/);
   });
 
-  it('includes the network error in the failure (B13)', { todo: 'B13: cause is dropped' }, async () => {
+  it('includes the network error in the failure (B13)', async () => {
     const result = await runProbe({ credentials: { ldapMonUser: DN, ldapMonPass: PASSWORD, ldapHost: 'down.test', ldapPort: '389' } });
     assert.match(result.failure, /ECONNREFUSED/);
   });
 
-  it('retries without restarting markers that were already used (B12)', { todo: 'B12: retry restarts the connect marker, which ThousandEyes rejects' }, async () => {
+  it('retries without restarting markers that were already used (B12)', async () => {
     const result = await runProbe({ credentials: { ldapMonUser: DN, ldapMonPass: PASSWORD, ldapHost: 'down.test', ldapPort: '389' } });
     assert.equal(eventsOf(result, 'marker.error').length, 0);
   });
 
-  it('fails a connect that never completes before the test time limit (B11)', { todo: 'B11: no connect timeout' }, async () => {
+  it('fails a connect that never completes before the test time limit (B11)', async () => {
     const result = await runProbe(
       {
         credentials: { ldapMonUser: DN, ldapMonPass: PASSWORD, ldapHost: HOST, ldapPort: '389' },
@@ -353,6 +354,45 @@ describe('connection failures', () => {
       { timeLimitMs: 5_000 },
     );
     assert.equal(result.verdict, 'fail');
+    assert.match(result.failure, /Connection failed after 1 attempt: connect to ldap\.test:389 timed out after \d+ ms/);
+  });
+
+  it('records each attempt under its own marker and the connect marker once', async () => {
+    const result = await runProbe({ credentials: { ldapMonUser: DN, ldapMonPass: PASSWORD, ldapHost: 'down.test', ldapPort: '389' } });
+    assert.equal(eventsOf(result, 'connect').length, 3);
+    assert.deepEqual(eventsOf(result, 'marker.start').map((e) => e.name),
+      ['ldap-attempt-1', 'ldap-tcp-connect', 'ldap-attempt-2', 'ldap-attempt-3']);
+    assert.equal(eventsOf(result, 'marker.stop').length, 4);
+  });
+
+  it('fails a stalled bind with a timeout error before the test time limit', async () => {
+    const started = Date.now();
+    const result = await probe({ bind: () => [] }, { credentials: { ldapBindOnly: 'true' }, settings: { timeout: 2 }, timeLimitMs: 5_000 });
+    assert.equal(result.verdict, 'fail');
+    assert.match(result.failure, /^Bind failed: waiting for the server response timed out after \d+ ms/);
+    assert.ok(Date.now() - started < 2_000, 'the probe must give up before the 2 s time limit');
+  });
+
+  it('keeps a stalled Unbind and close within the test time limit', async () => {
+    const started = Date.now();
+    const result = await probe(
+      { bind: () => [] },
+      { credentials: { ldapBindOnly: 'true' }, settings: { timeout: 2 }, stallCleanup: true, timeLimitMs: 5_000 },
+    );
+    assert.equal(result.verdict, 'fail');
+    assert.match(result.failure, /^Bind failed: waiting for the server response timed out/);
+    assert.ok(Date.now() - started < 2_000, 'cleanup must not run past the 2 s time limit');
+  });
+
+  it('retries a refused LDAPS connection even when the host name contains a TLS keyword', async () => {
+    const result = await runProbe({ credentials: { ldapMonUser: DN, ldapMonPass: PASSWORD, ldapHost: 'tls-certificate-gw.test', ldapPort: '636' } });
+    assert.equal(eventsOf(result, 'connectTls').length, 3);
+    assert.match(result.failure, /^Connection failed after 3 attempts: connect ECONNREFUSED/);
+  });
+
+  it('treats a timeout above the 180 s maximum as milliseconds', async () => {
+    const result = await probe({ bind: bindOk }, { credentials: { ldapBindOnly: 'true' }, settings: { timeout: 45_000 } });
+    assert.deepEqual(eventsOf(result, 'setTimeout').map((e) => e.value), [45_000]);
   });
 
   it('fails a bind that never gets a response once the socket timeout expires', async () => {
@@ -385,9 +425,8 @@ describe('LDAPS', () => {
   it('fails when the certificate is not trusted', { skip: skip() }, async () => {
     const result = await tlsProbe({ bind: bindOk }, { credentials: { ldapBindOnly: 'true' } });
     assert.equal(result.verdict, 'fail');
-    // The final message is "Connection failed after 3 attempts": the retry trips over its own
-    // marker (B12) before reaching the TLS-specific message, so only the first attempt says why.
-    assert.match(result.stdout, /Certificate\/TLS error on attempt 1/);
+    assert.match(result.failure, /^TLS handshake with ldap\.test:636 failed: /);
+    assert.match(result.failure, /provide it in the ldapCaBase64 credential/);
   });
 
   it('fails when the certificate does not match the hostname', { skip: skip() }, async () => {
@@ -401,17 +440,17 @@ describe('LDAPS', () => {
     assert.equal(result.verdict, 'fail');
   });
 
-  it('includes the TLS verification error in the failure (B13)', { skip: skip(), todo: 'B13: cause is dropped' }, async () => {
+  it('includes the TLS verification error in the failure (B13)', { skip: skip() }, async () => {
     const result = await tlsProbe({ bind: bindOk }, { credentials: { ldapBindOnly: 'true' } });
     assert.match(result.failure, /self[- ]signed|unable to verify|UNABLE_TO_VERIFY/i);
   });
 
-  it('accepts a CA certificate stored as PEM text (B22)', { skip: skip(), todo: 'B22: only base64-of-PEM is accepted' }, async () => {
+  it('accepts a CA certificate stored as PEM text (B22)', { skip: skip() }, async () => {
     const result = await tlsProbe({ bind: bindOk }, { credentials: { ldapBindOnly: 'true', ldapCaBase64: fixture.caPem } });
     assert.equal(result.verdict, 'pass');
   });
 
-  it('connects to an IP address without setting it as SNI servername (B18)', { skip: skip(), todo: 'B18: IP servername throws on current Node' }, async () => {
+  it('connects to an IP address without setting it as SNI servername (B18)', { skip: skip() }, async () => {
     const result = await tlsProbe(
       { bind: bindOk },
       {
@@ -420,5 +459,24 @@ describe('LDAPS', () => {
       },
     );
     assert.equal(result.verdict, 'pass');
+    assert.equal(eventsOf(result, 'connectTls')[0].options.servername, undefined);
+  });
+
+  it('does not retry a certificate verification failure', { skip: skip() }, async () => {
+    const result = await tlsProbe({ bind: bindOk }, { credentials: { ldapBindOnly: 'true' } });
+    assert.equal(eventsOf(result, 'connectTls').length, 1);
+  });
+
+  it('accepts PEM whose line breaks were flattened to spaces', { skip: skip() }, async () => {
+    const flattened = fixture.caPem.replace(/\n/g, ' ');
+    const result = await tlsProbe({ bind: bindOk }, { credentials: { ldapBindOnly: 'true', ldapCaBase64: flattened } });
+    assert.equal(result.verdict, 'pass', result.failure ?? '');
+  });
+
+  it('reports a CA credential without a certificate as a configuration error, before connecting', { skip: skip() }, async () => {
+    const result = await tlsProbe({ bind: bindOk }, { credentials: { ldapBindOnly: 'true', ldapCaBase64: 'bm90IGEgY2VydGlmaWNhdGU=' } });
+    assert.equal(result.verdict, 'fail');
+    assert.match(result.failure, /^Configuration error: ldapCaBase64 holds no certificate/);
+    assert.equal(eventsOf(result, 'connectTls').length, 0);
   });
 });
