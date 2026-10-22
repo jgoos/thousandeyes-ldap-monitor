@@ -4,7 +4,6 @@
  * • Authenticated LDAPv3 simple bind
  * • LDAP search with objectClass filter for maximum compatibility
  * • Fails (throws) on error or if either round-trip exceeds `slowMs`
- * • Includes ThousandEyes environment workarounds for HTTP proxy limitations
  *
  * Secure Credentials required:
  *   ldapMonUser  →  full bind DN   (e.g. "cn=monitor,ou=svc,dc=example,dc=com")
@@ -21,9 +20,332 @@
 import { net, credentials, test, markers } from 'thousandeyes';
 
 // Constants
-const MAX_RESPONSE_SIZE = 1000000; // 1MB safety limit for search responses
+const MAX_RESPONSE_SIZE = 1000000; // 1MB safety limit for everything the server sends on one connection
 const TLS_ERROR_KEYWORDS = ['certificate', 'CERT_', 'SSL', 'TLS'];
 const CREDENTIAL_ALTERNATIVES = ['ldapbasedn', 'LdapBaseDN', 'LDAPBASEDN', 'ldap_base_dn', 'LDAP_BASE_DN'];
+const MAX_EMPTY_READS = 3; // consecutive empty reads treated as end of stream
+const MAX_DIAGNOSTIC_LENGTH = 200; // characters of server diagnosticMessage kept in errors
+
+/* ───────────── LDAP protocol codec (RFC 4511; BER per section 5.1) ───────────── */
+
+const LDAP_TAG = {
+  boolean: 0x01,
+  integer: 0x02,
+  octetString: 0x04,
+  enumerated: 0x0a,
+  sequence: 0x30,
+  bindRequest: 0x60,          // [APPLICATION 0]
+  bindResponse: 0x61,         // [APPLICATION 1]
+  unbindRequest: 0x42,        // [APPLICATION 2], primitive NULL
+  searchRequest: 0x63,        // [APPLICATION 3]
+  searchResultEntry: 0x64,    // [APPLICATION 4]
+  searchResultDone: 0x65,     // [APPLICATION 5]
+  searchResultReference: 0x73, // [APPLICATION 19]
+  extendedResponse: 0x78,     // [APPLICATION 24]
+  intermediateResponse: 0x79, // [APPLICATION 25]
+  simpleAuth: 0x80,           // BindRequest authentication [0] simple
+  presentFilter: 0x87,        // Filter [7] present
+  responseName: 0x8a,         // ExtendedResponse [10] responseName
+};
+
+const MESSAGE_ID = { bind: 1, search: 2, unbind: 3 };
+const SEARCH_SCOPE_BASE = 0;
+const NEVER_DEREF_ALIASES = 0;
+const NO_ATTRIBUTES = '1.1'; // RFC 4511 4.5.1.8: return no attributes
+const NOTICE_OF_DISCONNECTION_OID = '1.3.6.1.4.1.1466.20036';
+
+/** RFC 4511 4.1.9 result codes. */
+const LDAP_RESULT_CODES = {
+  0x00: { name: 'success', description: 'The operation completed successfully' },
+  0x01: { name: 'operationsError', description: 'The operation is not properly sequenced with respect to other operations' },
+  0x02: { name: 'protocolError', description: 'The server received data that is not well-formed or the LDAP version is not supported' },
+  0x03: { name: 'timeLimitExceeded', description: 'The time limit specified by the client was exceeded before the operation could complete' },
+  0x04: { name: 'sizeLimitExceeded', description: 'The size limit specified by the client was exceeded before the operation could complete' },
+  0x05: { name: 'compareFalse', description: 'The Compare operation completed and the assertion evaluated to FALSE' },
+  0x06: { name: 'compareTrue', description: 'The Compare operation completed and the assertion evaluated to TRUE' },
+  0x07: { name: 'authMethodNotSupported', description: 'The requested authentication method or mechanism is not supported by the server' },
+  0x08: { name: 'strongerAuthRequired', description: 'The server requires stronger authentication to complete the operation' },
+  0x0A: { name: 'referral', description: 'The server referred the client to another server' },
+  0x0B: { name: 'adminLimitExceeded', description: 'An administrative limit (e.g., maximum number of entries, operations, or subordinates) has been exceeded' },
+  0x0C: { name: 'unavailableCriticalExtension', description: 'A critical control in the request is unrecognized or unsupported' },
+  0x0D: { name: 'confidentialityRequired', description: 'The operation requires confidentiality (e.g., TLS) that is not in place' },
+  0x0E: { name: 'saslBindInProgress', description: 'The server requires the client to send a new SASL bind request to continue' },
+  0x10: { name: 'noSuchAttribute', description: 'The target entry does not contain the specified attribute or attribute value' },
+  0x11: { name: 'undefinedAttributeType', description: 'The request references an attribute description not defined in the server\'s schema' },
+  0x12: { name: 'inappropriateMatching', description: 'A matching rule was used that is not defined for the attribute\'s syntax' },
+  0x13: { name: 'constraintViolation', description: 'An attribute value violates a constraint (e.g., supplying multiple values to a SINGLE-VALUE attribute)' },
+  0x14: { name: 'attributeOrValueExists', description: 'Attempted to add an attribute or value that already exists in the entry' },
+  0x15: { name: 'invalidAttributeSyntax', description: 'An attribute value does not conform to the attribute\'s defined syntax' },
+  0x20: { name: 'noSuchObject', description: 'The specified object does not exist in the directory information tree (DIT)' },
+  0x21: { name: 'aliasProblem', description: 'An alias error occurred (e.g., an alias names no object when dereferenced)' },
+  0x22: { name: 'invalidDNSyntax', description: 'A Distinguished Name (DN) in the request does not conform to the required syntax' },
+  0x24: { name: 'aliasDereferencingProblem', description: 'A problem occurred while dereferencing an alias' },
+  0x30: { name: 'inappropriateAuthentication', description: 'Anonymous or no-credential bind attempted when credentials are required' },
+  0x31: { name: 'invalidCredentials', description: 'The provided credentials (DN/password) are incorrect, expired, or the account is locked' },
+  0x32: { name: 'insufficientAccessRights', description: 'The client lacks sufficient privileges to perform the operation' },
+  0x33: { name: 'busy', description: 'The server is too busy to process the request at this time—you may retry later' },
+  0x34: { name: 'unavailable', description: 'The server (or a necessary subsystem) is shutting down or offline' },
+  0x35: { name: 'unwillingToPerform', description: 'The server is unwilling to perform the operation (often due to server-specific policy)' },
+  0x36: { name: 'loopDetect', description: 'The server detected an internal loop (e.g., alias or referral loop) and aborted' },
+  0x40: { name: 'namingViolation', description: 'The name of the entry violates naming restrictions defined by the directory\'s schema' },
+  0x41: { name: 'objectClassViolation', description: 'The entry violates object class constraints (e.g., required attributes missing)' },
+  0x42: { name: 'notAllowedOnNonLeaf', description: 'The operation is not allowed on a non-leaf entry (e.g., attempting to delete a non-leaf node)' },
+  0x43: { name: 'notAllowedOnRDN', description: 'Attempted to remove or modify an attribute that forms the entry\'s RDN' },
+  0x44: { name: 'entryAlreadyExists', description: 'Cannot add, move, or rename an entry because the target already exists' },
+  0x45: { name: 'objectClassModsProhibited', description: 'Modifying the objectClass attribute is not allowed (e.g., changing an entry\'s structural class)' },
+  0x47: { name: 'affectsMultipleDSAs', description: 'The operation would span multiple directory servers (DSAs) and cannot be performed as a single operation' },
+  0x50: { name: 'other', description: 'An internal error occurred that does not fit another code' }
+};
+
+/**
+ * Human-readable result code: "name (code/0xNN): description".
+ * @param {number} resultCode
+ * @returns {string}
+ */
+const getLdapErrorMessage = (resultCode) => {
+  const hex = resultCode.toString(16).padStart(2, '0');
+  const info = LDAP_RESULT_CODES[resultCode];
+  return info
+    ? `${info.name} (${resultCode}/0x${hex}): ${info.description}`
+    : `Unknown LDAP result code ${resultCode} (0x${hex})`;
+};
+
+/**
+ * Whether a character could break or disguise a one-line message: C0 and C1 controls, DEL,
+ * Unicode line and paragraph separators, and bidirectional formatting characters.
+ */
+const isUnsafeChar = (ch) =>
+  ch < ' ' ||
+  (ch >= '\u007f' && ch <= '\u009f') ||
+  ch === '\u2028' || ch === '\u2029' ||
+  ch === '\u200e' || ch === '\u200f' ||
+  (ch >= '\u202a' && ch <= '\u202e') ||
+  (ch >= '\u2066' && ch <= '\u2069');
+
+/** Server-supplied text, made safe for a one-line error: no unsafe characters, bounded length. */
+const sanitizeServerText = (text) =>
+  Array.from(text, (ch) => (isUnsafeChar(ch) ? ' ' : ch)).join('').trim().slice(0, MAX_DIAGNOSTIC_LENGTH);
+
+/**
+ * Describe an LDAPResult, including the server's diagnosticMessage and matchedDN when present.
+ * @param {{ resultCode: number, matchedDN: string, diagnosticMessage: string }} result
+ * @returns {string}
+ */
+const formatLdapResult = ({ resultCode, matchedDN, diagnosticMessage }) => {
+  let text = getLdapErrorMessage(resultCode);
+  const diagnostic = sanitizeServerText(diagnosticMessage);
+  const matched = sanitizeServerText(matchedDN);
+  if (diagnostic) text += ` - server: "${diagnostic}"`;
+  if (matched) text += ` (matchedDN: "${matched}")`;
+  return text;
+};
+
+/* BER encoding. Lengths use the definite form only (RFC 4511 5.1). */
+
+/** @param {number} length @returns {Buffer} */
+const berLength = (length) => {
+  if (length < 0x80) return Buffer.from([length]);
+  const bytes = [];
+  for (let v = length; v > 0; v = Math.floor(v / 256)) bytes.unshift(v & 0xff);
+  return Buffer.from([0x80 | bytes.length, ...bytes]);
+};
+
+/** @param {number} tag @param {Buffer} value @returns {Buffer} */
+const berTlv = (tag, value) => Buffer.concat([Buffer.from([tag]), berLength(value.length), value]);
+
+/** Non-negative INTEGER or ENUMERATED in minimal two's-complement form. */
+const berUnsigned = (tag, n) => {
+  const bytes = [];
+  let v = n;
+  do {
+    bytes.unshift(v & 0xff);
+    v = Math.floor(v / 256);
+  } while (v > 0);
+  if (bytes[0] & 0x80) bytes.unshift(0);
+  return berTlv(tag, Buffer.from(bytes));
+};
+
+const berInteger = (n) => berUnsigned(LDAP_TAG.integer, n);
+const berEnumerated = (n) => berUnsigned(LDAP_TAG.enumerated, n);
+const berBoolean = (value) => berTlv(LDAP_TAG.boolean, Buffer.from([value ? 0xff : 0x00]));
+const berOctetString = (text) => berTlv(LDAP_TAG.octetString, Buffer.from(text, 'utf8'));
+
+/** LDAPMessage envelope (RFC 4511 4.1.1). */
+const ldapMessage = (messageId, protocolOp) =>
+  berTlv(LDAP_TAG.sequence, Buffer.concat([berInteger(messageId), protocolOp]));
+
+/** LDAPv3 simple BindRequest (RFC 4511 4.2). */
+const bindRequest = (dn, password) =>
+  berTlv(LDAP_TAG.bindRequest, Buffer.concat([
+    berInteger(3),
+    berOctetString(dn),
+    berTlv(LDAP_TAG.simpleAuth, Buffer.from(password, 'utf8'))
+  ]));
+
+/** SearchRequest with a present filter (RFC 4511 4.5.1). */
+const searchRequest = ({ baseObject, scope, sizeLimit, timeLimit, presentAttribute, attributes }) =>
+  berTlv(LDAP_TAG.searchRequest, Buffer.concat([
+    berOctetString(baseObject),
+    berEnumerated(scope),
+    berEnumerated(NEVER_DEREF_ALIASES),
+    berInteger(sizeLimit),
+    berInteger(timeLimit),
+    berBoolean(false), // typesOnly
+    berTlv(LDAP_TAG.presentFilter, Buffer.from(presentAttribute, 'utf8')),
+    berTlv(LDAP_TAG.sequence, Buffer.concat(attributes.map(berOctetString)))
+  ]));
+
+/** UnbindRequest: [APPLICATION 2] NULL (RFC 4511 4.3). */
+const unbindRequest = () => Buffer.from([LDAP_TAG.unbindRequest, 0x00]);
+
+/* BER decoding. */
+
+/**
+ * Locate one BER element at `pos`.
+ * @param {Buffer} buf
+ * @param {number} pos
+ * @returns {{ tag: number, valueStart: number, end: number } | null}
+ *   null while `buf` does not yet hold the whole element
+ * @throws {Error} for encodings LDAP does not allow, or lengths above MAX_RESPONSE_SIZE
+ */
+function readBerElement(buf, pos) {
+  if (pos + 2 > buf.length) return null;
+  const tag = buf[pos];
+  if ((tag & 0x1f) === 0x1f) throw new Error(`unsupported multi-byte BER tag at offset ${pos}`);
+  let length = buf[pos + 1];
+  let header = 2;
+  if (length & 0x80) {
+    const octets = length & 0x7f;
+    if (octets === 0) throw new Error('indefinite-length BER encoding, which LDAP does not allow');
+    if (octets > 4) throw new Error(`BER length uses ${octets} length octets`);
+    if (pos + 2 + octets > buf.length) return null;
+    length = 0;
+    for (let i = 0; i < octets; i++) length = length * 256 + buf[pos + 2 + i];
+    header += octets;
+  }
+  if (length > MAX_RESPONSE_SIZE) throw new Error(`BER length ${length} exceeds the ${MAX_RESPONSE_SIZE}-byte limit`);
+  const end = pos + header + length;
+  return end > buf.length ? null : { tag, valueStart: pos + header, end };
+}
+
+/** Elements inside a constructed element; throws if one runs past its parent. */
+function readBerChildren(buf, parent) {
+  const children = [];
+  for (let pos = parent.valueStart; pos < parent.end;) {
+    const child = readBerElement(buf, pos);
+    if (!child || child.end > parent.end) {
+      throw new Error(`truncated element inside tag 0x${parent.tag.toString(16)}`);
+    }
+    children.push(child);
+    pos = child.end;
+  }
+  return children;
+}
+
+const berValue = (buf, element) => buf.subarray(element.valueStart, element.end);
+
+/** Non-negative INTEGER or ENUMERATED that fits in 31 bits (message IDs, result codes). */
+function readBerUnsigned(buf, element, expectedTag) {
+  if (!element || element.tag !== expectedTag) {
+    throw new Error(`expected tag 0x${expectedTag.toString(16)}, got ${element ? `0x${element.tag.toString(16)}` : 'nothing'}`);
+  }
+  const value = berValue(buf, element);
+  if (value.length === 0 || value.length > 4 || (value[0] & 0x80) !== 0) {
+    throw new Error(`unsupported integer encoding (${value.length} bytes)`);
+  }
+  return value.reduce((n, byte) => n * 256 + byte, 0);
+}
+
+/**
+ * Decode an LDAPMessage envelope (RFC 4511 4.1.1). Controls, if any, are ignored.
+ * @param {Buffer} pdu - exactly one complete LDAPMessage
+ * @returns {{ messageId: number, opTag: number, op: object, pdu: Buffer }}
+ */
+function decodeLdapMessage(pdu) {
+  const message = readBerElement(pdu, 0);
+  if (message.tag !== LDAP_TAG.sequence) throw new Error(`expected an LDAPMessage SEQUENCE, got tag 0x${message.tag.toString(16)}`);
+  const [id, op] = readBerChildren(pdu, message);
+  if (!op) throw new Error('LDAPMessage has no protocolOp');
+  return { messageId: readBerUnsigned(pdu, id, LDAP_TAG.integer), opTag: op.tag, op, pdu };
+}
+
+/**
+ * LDAPResult fields of a response operation (RFC 4511 4.1.9).
+ * @returns {{ resultCode: number, matchedDN: string, diagnosticMessage: string, responseName: string }}
+ *   responseName is set only for an ExtendedResponse that carries one
+ */
+function decodeLdapResult({ pdu, op }) {
+  const [code, matchedDN, diagnostic, ...rest] = readBerChildren(pdu, op);
+  if (!diagnostic || matchedDN.tag !== LDAP_TAG.octetString || diagnostic.tag !== LDAP_TAG.octetString) {
+    throw new Error(`malformed LDAPResult in tag 0x${op.tag.toString(16)}`);
+  }
+  const name = rest.find((el) => el.tag === LDAP_TAG.responseName);
+  return {
+    resultCode: readBerUnsigned(pdu, code, LDAP_TAG.enumerated),
+    matchedDN: berValue(pdu, matchedDN).toString('utf8'),
+    diagnosticMessage: berValue(pdu, diagnostic).toString('utf8'),
+    responseName: name ? berValue(pdu, name).toString('latin1') : ''
+  };
+}
+
+/**
+ * Reads whole LDAPMessages from a socket, whatever the TCP segmentation: buffers partial reads
+ * and splits reads that hold several messages (RFC 4511 5.2: messages are framed only by their
+ * BER length).
+ * @param {{ read: () => Promise<Buffer|null> }} sock
+ * @returns {() => Promise<ReturnType<typeof decodeLdapMessage>>}
+ */
+function createLdapMessageReader(sock) {
+  let buffered = Buffer.alloc(0);
+  let received = 0; // every byte on the connection, so many small messages cannot evade the limit
+  let emptyReads = 0;
+  return async function nextMessage() {
+    for (;;) {
+      if (buffered.length > 0 && buffered[0] !== LDAP_TAG.sequence) {
+        throw new Error(`response is not LDAP (first byte 0x${buffered[0].toString(16)})`);
+      }
+      const element = readBerElement(buffered, 0);
+      if (element) {
+        const pdu = buffered.subarray(0, element.end);
+        buffered = buffered.subarray(element.end);
+        return decodeLdapMessage(pdu);
+      }
+      const chunk = await sock.read();
+      if (!chunk || chunk.length === 0) {
+        if (!chunk || ++emptyReads >= MAX_EMPTY_READS) throw new Error('connection closed by the server');
+        continue;
+      }
+      emptyReads = 0;
+      received += chunk.length;
+      if (received > MAX_RESPONSE_SIZE) throw new Error(`server sent more than ${MAX_RESPONSE_SIZE} bytes`);
+      buffered = Buffer.concat([buffered, chunk]);
+    }
+  };
+}
+
+/**
+ * Next message for `messageId`. A Notice of Disconnection or other unsolicited notification
+ * (messageID 0, RFC 4511 4.4) or a message for another operation is an error.
+ */
+async function nextResponse(nextMessage, messageId) {
+  const message = await nextMessage();
+  if (message.messageId === messageId) return message;
+  if (message.messageId === 0 && message.opTag === LDAP_TAG.extendedResponse) {
+    const result = decodeLdapResult(message);
+    const kind = result.responseName === NOTICE_OF_DISCONNECTION_OID ? 'a Notice of Disconnection' : 'an unsolicited notification';
+    throw new Error(`server sent ${kind}: ${formatLdapResult(result)}`);
+  }
+  throw new Error(`unexpected message ID ${message.messageId} (expected ${messageId})`);
+}
+
+/** Run `step`, prefixing any error with "<phase> failed: ". */
+async function inPhase(phase, step) {
+  try {
+    return await step();
+  } catch (err) {
+    throw new Error(`${phase} failed: ${err && err.message || 'Unknown error'}`, { cause: err });
+  }
+}
 
 /**
  * Get configuration from secure credentials with fallback defaults
@@ -156,123 +478,6 @@ async function runTest() {
     throw new Error('Invalid slowMs threshold: must be greater than 0');
   }
 
-  /* ---------- tiny BER helpers so we don't hard-code hex ---------- */
-  
-  /**
-   * Encode BER length (supports multi-byte lengths)
-   * @param {number} len - Length to encode
-   * @returns {Buffer} BER-encoded length
-   */
-  const berLen = (len) => {
-    if (len < 0x80) return Buffer.from([len]);
-    const bytes = [];
-    while (len > 0) {
-      bytes.unshift(len & 0xff);
-      len >>= 8;
-    }
-    return Buffer.from([0x80 | bytes.length, ...bytes]);
-  };
-
-  /**
-   * Generic Tag-Length-Value builder for BER encoding
-   * @param {number} tag - BER tag byte
-   * @param {Buffer} payload - Value to encode
-   * @returns {Buffer} TLV-encoded buffer
-   */
-  const tlv  = (tag, payload) =>
-    Buffer.concat([Buffer.from([tag]), berLen(payload.length), payload]);
-  
-  /** Encode INTEGER */
-  const int  = n   => tlv(0x02, Buffer.from([n]));
-  
-  /** Encode OCTET STRING */
-  const str  = (s) => tlv(0x04, Buffer.from(s, 'utf8'));
-  
-  /** Context-specific tag 0 for simple authentication */
-  const ctx0 = (b) => Buffer.concat([Buffer.from([0x80]), berLen(b.length), b]);
-  /* ---------------------------------------------------------------- */
-
-  /* --------- LDAP Result Codes and Error Messages --------- */
-  /**
-   * Comprehensive LDAP result codes for better error diagnosis
-   * Based on RFC 4511 and common LDAP implementations
-   */
-  const LDAP_RESULT_CODES = {
-    0x00: { name: 'success', description: 'The operation completed successfully' },
-    0x01: { name: 'operationsError', description: 'The operation is not properly sequenced with respect to other operations' },
-    0x02: { name: 'protocolError', description: 'The server received data that is not well-formed or the LDAP version is not supported' },
-    0x03: { name: 'timeLimitExceeded', description: 'The time limit specified by the client was exceeded before the operation could complete' },
-    0x04: { name: 'sizeLimitExceeded', description: 'The size limit specified by the client was exceeded before the operation could complete' },
-    0x07: { name: 'authMethodNotSupported', description: 'The requested authentication method or mechanism is not supported by the server' },
-    0x08: { name: 'strongerAuthRequired', description: 'The server requires stronger authentication to complete the operation' },
-    0x0B: { name: 'adminLimitExceeded', description: 'An administrative limit (e.g., maximum number of entries, operations, or subordinates) has been exceeded' },
-    0x0C: { name: 'unavailableCriticalExtension', description: 'A critical control in the request is unrecognized or unsupported' },
-    0x0D: { name: 'confidentialityRequired', description: 'The operation requires confidentiality (e.g., TLS) that is not in place' },
-    0x10: { name: 'noSuchAttribute', description: 'The target entry does not contain the specified attribute or attribute value' },
-    0x11: { name: 'undefinedAttributeType', description: 'The request references an attribute description not defined in the server\'s schema' },
-    0x12: { name: 'inappropriateMatching', description: 'A matching rule was used that is not defined for the attribute\'s syntax' },
-    0x13: { name: 'constraintViolation', description: 'An attribute value violates a constraint (e.g., supplying multiple values to a SINGLE-VALUE attribute)' },
-    0x14: { name: 'attributeOrValueExists', description: 'Attempted to add an attribute or value that already exists in the entry' },
-    0x15: { name: 'invalidAttributeSyntax', description: 'An attribute value does not conform to the attribute\'s defined syntax' },
-    0x20: { name: 'noSuchObject', description: 'The specified object does not exist in the directory information tree (DIT)' },
-    0x21: { name: 'aliasProblem', description: 'An alias error occurred (e.g., an alias names no object when dereferenced)' },
-    0x22: { name: 'invalidDNSyntax', description: 'A Distinguished Name (DN) in the request does not conform to the required syntax' },
-    0x24: { name: 'aliasDereferencingProblem', description: 'A problem occurred while dereferencing an alias' },
-    0x30: { name: 'inappropriateAuthentication', description: 'Anonymous or no-credential bind attempted when credentials are required' },
-    0x31: { name: 'invalidCredentials', description: 'The provided credentials (DN/password) are incorrect, expired, or the account is locked' },
-    0x32: { name: 'insufficientAccessRights', description: 'The client lacks sufficient privileges to perform the operation' },
-    0x33: { name: 'busy', description: 'The server is too busy to process the request at this time—you may retry later' },
-    0x34: { name: 'unavailable', description: 'The server (or a necessary subsystem) is shutting down or offline' },
-    0x35: { name: 'unwillingToPerform', description: 'The server is unwilling to perform the operation (often due to server-specific policy)' },
-    0x36: { name: 'loopDetect', description: 'The server detected an internal loop (e.g., alias or referral loop) and aborted' },
-    0x40: { name: 'namingViolation', description: 'The name of the entry violates naming restrictions defined by the directory\'s schema' },
-    0x41: { name: 'objectClassViolation', description: 'The entry violates object class constraints (e.g., required attributes missing)' },
-    0x42: { name: 'notAllowedOnNonLeaf', description: 'The operation is not allowed on a non-leaf entry (e.g., attempting to delete a non-leaf node)' },
-    0x43: { name: 'notAllowedOnRDN', description: 'Attempted to remove or modify an attribute that forms the entry\'s RDN' },
-    0x44: { name: 'entryAlreadyExists', description: 'Cannot add, move, or rename an entry because the target already exists' },
-    0x45: { name: 'objectClassModsProhibited', description: 'Modifying the objectClass attribute is not allowed (e.g., changing an entry\'s structural class)' },
-    0x47: { name: 'affectsMultipleDSAs', description: 'The operation would span multiple directory servers (DSAs) and cannot be performed as a single operation' },
-    0x50: { name: 'other', description: 'An internal error occurred that does not fit another code' }
-  };
-
-  /**
-   * Get a human-readable LDAP error message
-   * @param {number} resultCode - The LDAP result code
-   * @returns {string} Formatted error message with code, name, and description
-   */
-  // Get human-readable LDAP error message
-  const getLdapErrorMessage = (resultCode) => {
-    const errorInfo = LDAP_RESULT_CODES[resultCode];
-    if (errorInfo) {
-      return `${errorInfo.name} (${resultCode}/0x${toHex(resultCode)}): ${errorInfo.description}`;
-    } else {
-      const hex = toHex(resultCode);
-      const isAscii = resultCode >= 32 && resultCode <= 126;
-      const ascii = isAscii ? String.fromCharCode(resultCode) : 'non-printable';
-      
-      let debugMsg = `Unknown LDAP result code ${resultCode} (0x${hex})`;
-      if (isAscii) {
-        debugMsg += ` - ASCII '${ascii}' detected, possible proxy corruption`;
-      }
-      return debugMsg;
-    }
-  };
-
-  // Check for ThousandEyes ASCII corruption and handle appropriately
-  const isProxyCorruption = (resultCode, buf, idx) => {
-    if (!buf || idx == null || LDAP_RESULT_CODES[resultCode]) return false;
-    let count = 0;
-    for (let i = idx; i < buf.length && count < 3; i++) {
-      const b = buf[i];
-      if (b >= 0x20 && b <= 0x7e) {
-        count++;
-      } else {
-        break;
-      }
-    }
-    return count >= 3;
-  };
-  /* ---------------------------------------------------------------- */
 
   /* --------- TLS information logging (defensive for TypeScript) --------- */
   /**
@@ -364,134 +569,10 @@ async function runTest() {
     });
   };
 
-
-
-  /**
-   * Safely concatenate buffer chunks in a TypeScript-compatible way
-   * @param {Array} chunks - Array of chunks to concatenate
-   * @returns {Buffer|null} Concatenated buffer or null if failed
-   */
-  const safeBufferConcat = (chunks) => {
-    try {
-      if (!Array.isArray(chunks) || chunks.length === 0) {
-        return null;
-      }
-      
-      // Ensure all chunks are valid before concatenating
-      const validChunks = chunks.filter(chunk => 
-        chunk && (Buffer.isBuffer(chunk) || chunk.length !== undefined)
-      );
-      
-      if (validChunks.length === 0) return null;
-      
-      return Buffer.concat(validChunks);
-    } catch (error) {
-      return null;
-    }
-  };
-
-  // Unified hex formatter
-  const toHex = (num) => {
-    const hex = num.toString(16);
-    return hex.length === 1 ? '0' + hex : hex;
-  };
-
   // Check if error message indicates TLS/certificate issues
   const isTlsError = (errorMsg) => {
     return TLS_ERROR_KEYWORDS.some(keyword => errorMsg.includes(keyword));
   };
-
-  // Report proxy-corrupted success (shared function)
-  const reportProxySuccess = (metrics, bindRTT, searchRTT) => {
-    console.log('ThousandEyes Environment: LDAP response corrupted, treating as success');
-    const totalTime = metrics.searchEnd - metrics.connectionStart;
-    const connectionTime = metrics.connectionEnd - metrics.connectionStart;
-    console.log(`LDAP Monitor: PASS (Proxy-Limited) - Total ${totalTime}ms (connect: ${connectionTime}ms, bind: ${bindRTT}ms, search: ${searchRTT}ms)`);
-  };
-
-  /**
-   * Parse BER length field starting at given position
-   * @param {any} buffer - The buffer to parse
-   * @param {number} pos - Position of length field
-   * @returns {object} {length: number, bytesUsed: number} or null if invalid
-   */
-  const parseBerLength = (buffer, pos) => {
-    try {
-      if (!buffer || pos >= buffer.length) return null;
-      const first = buffer[pos];
-      let len, hdr;
-      if (first <= 0x7F) {
-        len = first; hdr = 1;
-      } else if (first === 0x80) {
-        return null;
-      } else {
-        const octets = first & 0x7F;
-        if (octets < 1 || octets > 4 || pos + octets >= buffer.length) return null;
-        len = 0; hdr = 1 + octets;
-        for (let i = 1; i <= octets; i++) len = (len << 8) | buffer[pos + i];
-      }
-      return (len + hdr > Number.MAX_SAFE_INTEGER || len + hdr > buffer.length - pos)
-        ? null
-        : { length: len, bytesUsed: hdr };
-    } catch (e) {
-      return null;
-    }
-  };
-
-  /**
-   * Find SearchResultDone (0x65) in proper LDAP message context
-   * @param {any} response - The response buffer to search
-   * @returns {number} Index of SearchResultDone or -1 if not found
-   */
-  const findSearchDoneIndex = (response) => {
-    try {
-      if (!response || !response.length) return -1;
-      
-      // Look for 0x65 in proper LDAP context, not just any 0x65 byte
-      for (let i = response.length - 1; i >= 0; i--) {
-        if (response[i] === 0x65) {
-          
-          // Validate this is a real LDAP SearchResultDone, not ASCII text
-          
-          // Check if we have enough bytes after 0x65 for length + result code
-          if (i + 2 >= response.length) {
-            continue; // Not enough bytes for a minimal LDAP message
-          }
-          
-          // Parse the BER length field properly
-          const lengthInfo = parseBerLength(response, i + 1);
-          if (!lengthInfo) {
-            continue;
-          }
-          
-          // Validate BER length doesn't exceed available bytes
-          const availableBytes = response.length - i;
-          const totalMessageSize = 1 + lengthInfo.bytesUsed + lengthInfo.length;
-          if (totalMessageSize > availableBytes) {
-            continue;
-          }
-          
-          // Check for SEQUENCE before this position (basic LDAP structure validation)
-          let foundSequence = false;
-          for (let j = Math.max(0, i - 20); j < i; j++) {
-            if (response[j] === 0x30) {
-              foundSequence = true;
-              break;
-            }
-          }
-          
-          if (foundSequence) {
-            return i;
-          }
-        }
-      }
-      
-      return -1;
-    } catch (error) {
-      return -1;
-    }
-  };
-  /* --------------------------------------------------------------------- */
 
   /* Performance metrics collector */
   const metrics = {
@@ -642,22 +723,10 @@ async function runTest() {
     throw new Error('Socket not available after connection attempts');
   }
 
-  try {
-    /* 2 ▸ LDAPv3 simple-bind  (messageID = 1) */
-    const bindReq = tlv(
-      0x30,                                   // outer SEQUENCE
-      Buffer.concat([
-        int(1),                               // messageID
-        tlv(0x60,                             // [APPLICATION 0] BindRequest
-          Buffer.concat([
-            int(3),                           // version 3
-            str(bindDN),                      // bind DN
-            ctx0(Buffer.from(bindPwd, 'utf8')) // password
-          ])
-        )
-      ])
-    );
+  const nextMessage = createLdapMessageReader(sock);
 
+  try {
+    /* 2 ▸ LDAPv3 simple bind (messageID 1) */
     let bindRTT;
     metrics.bindStart = Date.now();
     markers.start('ldap-bind');
@@ -666,88 +735,36 @@ async function runTest() {
       if (!sock || typeof sock.writeAll !== 'function' || typeof sock.read !== 'function') {
         throw new Error('Socket does not have required writeAll/read methods');
       }
-      
+
       if (debugMode) {
-        console.log(`Debug: Sending bind request (${bindReq.length} bytes)`);
+        console.log('Debug: Sending bind request');
       }
-      await sock.writeAll(bindReq);
-      const bindRsp = await sock.read();
+      await sock.writeAll(ldapMessage(MESSAGE_ID.bind, bindRequest(bindDN, bindPwd)));
+      const bindResult = await inPhase('Bind', async () => {
+        const response = await nextResponse(nextMessage, MESSAGE_ID.bind);
+        if (response.opTag !== LDAP_TAG.bindResponse) {
+          throw new Error(`expected a BindResponse, got tag 0x${response.opTag.toString(16)}`);
+        }
+        return decodeLdapResult(response);
+      });
       metrics.bindEnd = Date.now();
 
       bindRTT = metrics.bindEnd - metrics.bindStart;
       if (debugMode) {
-        console.log(`Debug: Bind RTT: ${bindRTT} ms`);
+        console.log(`Debug: Bind RTT: ${bindRTT} ms, result code ${bindResult.resultCode}`);
       }
 
-      /* Bind response validation */
-      if (!bindRsp || !bindRsp.length) {
-        throw new Error('Bind failed: No response received from server');
-      }
-
-      if (debugMode) {
-        console.log(`Debug: Received bind response: ${bindRsp.length} bytes`);
-      }
-      
-      // Simplified bind response validation
-      if (debugMode && bindRsp.length > 0) {
-        console.log(`Debug: Bind response structure - [0]=0x${toHex(bindRsp[0])}, [8]=0x${toHex(bindRsp[8] || 0)}`);
-      }
-
-      // Check for LDAP message structure: 0x30 (SEQUENCE) at start
-      if (bindRsp.length > 0 && bindRsp[0] !== 0x30) {
-        throw new Error(`Bind failed: Invalid LDAP message format - expected SEQUENCE (0x30), got 0x${toHex(bindRsp[0])}`);
-      }
-
-      // Look for BindResponse (0x61) - might be at different position depending on message structure
-      let bindResponsePosition = -1;
-      const maxSearchLen = (bindRsp.length - 1) < 20 ? (bindRsp.length - 1) : 20;
-      for (let i = 0; i < maxSearchLen; i++) {
-        if (bindRsp[i] === 0x61) {
-          bindResponsePosition = i;
-          break;
-        }
-      }
-      
-      if (bindResponsePosition === -1) {
-        // Look for any response type indicators
-        const responseTypes = [];
-        const maxScanLen = bindRsp.length < 20 ? bindRsp.length : 20;
-        for (let i = 0; i < maxScanLen; i++) {
-          if (bindRsp[i] >= 0x60 && bindRsp[i] <= 0x78) { // LDAP response range
-            responseTypes.push(`0x${Number(bindRsp[i]).toString(16)} at position ${i}`);
-          }
-        }
-        throw new Error(`Bind failed: No BindResponse (0x61) found in response. Found response types: ${responseTypes.length > 0 ? responseTypes.join(', ') : 'none'}`);
-      }
-      
-      if (debugMode) {
-        console.log(`Debug: BindResponse found at position ${bindResponsePosition}`);
-      }
-
-      // Check bind result code
-      const resultCodePosition = bindResponsePosition + 4;
-      if (bindRsp.length > resultCodePosition) {
-        const resultCode = Number(bindRsp[resultCodePosition]);
-        
-        if (resultCode !== 0x00) {
-          const errorMsg = getLdapErrorMessage(resultCode);
-          throw new Error(`Authentication failed: ${errorMsg}`);
-        }
-        
-        // Authentication successful (details in final summary)
-      } else {
-        throw new Error('Authentication failed: Invalid response format');
+      if (bindResult.resultCode !== 0) {
+        throw new Error(`Authentication failed: ${formatLdapResult(bindResult)}`);
       }
 
       if (bindRTT > slowMs) {
         throw new Error(`Slow bind: ${bindRTT} ms (>${slowMs}ms threshold)`);
       }
-      
-      // Bind success logged above
     } finally {
       markers.stop('ldap-bind');
     }
-    
+
     // Check if bind-only mode is enabled
     if (bindOnlyMode) {
       const totalTime = metrics.bindEnd - metrics.connectionStart;
@@ -756,297 +773,76 @@ async function runTest() {
       return;
     }
 
-    /* 3 ▸ Simple narrow search using bind DN (messageID = 2) */
-    // Since bind succeeded, we know the bind DN exists - search it directly
-    const searchScope = 0; // Base scope - exact DN only
-    const searchFilter = '(objectClass=*)'; // Simple existence check
-    const sizeLimit = 1; // Expect exactly one result
-    const timeLimit = 5; // 5 seconds
-    
-    if (debugMode) {
-      console.log('Debug: Search strategy - base scope on bind DN');
-      console.log(`Debug: Filter: '${searchFilter}'`);
-    }
-    
-    const searchReqBody = Buffer.concat([
-      str(bindDN),                           // baseObject - the bind DN
-      int(searchScope),                      // scope: 0 = base (exact DN only)
-      int(0),                               // derefAliases: 0 = never
-      Buffer.from([0x02, 0x01, sizeLimit]), // sizeLimit: 1
-      Buffer.from([0x02, 0x01, timeLimit]), // timeLimit: 5 seconds
-      Buffer.from([0x01, 0x01, 0x00]),      // typesOnly: FALSE
-      (() => {
-        // Simple objectClass presence filter
-        const attrBuf = Buffer.from('objectClass', 'utf8');
-        return Buffer.concat([Buffer.from([0x87]), berLen(attrBuf.length), attrBuf]);
-      })(),
-      Buffer.from([0x30, 0x00])             // attributes: none
-    ]);
+    /* 3 ▸ Base-scope search on the bind DN (messageID 2) */
+    // The bind succeeded, so the bind DN exists. Request no attributes: the check needs only
+    // the result code, and the account's own entry can hold sensitive values.
+    const searchReq = ldapMessage(MESSAGE_ID.search, searchRequest({
+      baseObject: bindDN,
+      scope: SEARCH_SCOPE_BASE,
+      sizeLimit: 1,
+      timeLimit: 5, // seconds
+      presentAttribute: 'objectClass',
+      attributes: [NO_ATTRIBUTES]
+    }));
 
-    const searchReq = tlv(
-      0x30,                                   // outer SEQUENCE
-      Buffer.concat([
-        int(2),                               // messageID
-        tlv(0x63, searchReqBody)              // [APPLICATION 3] SearchRequest
-      ])
-    );
+    if (debugMode) {
+      console.log("Debug: Search strategy - base scope on bind DN, filter '(objectClass=*)', attributes '1.1'");
+    }
 
     metrics.searchStart = Date.now();
     markers.start('ldap-search');
-    let searchRsp;
+    let searchResult;
+    let entries = 0;
     try {
-      if (debugMode) {
-        console.log(`Debug: Sending search request (${searchReq.length} bytes)`);
-      }
-      
       await sock.writeAll(searchReq);
-
-      const searchChunks = [];
-      let totalBytesRead = 0;
-      let consecutiveEmptyReads = 0;
-      let expected;
-
-      while (true) {
-        const chunk = await sock.read();
-        if (!chunk || chunk.length === 0) {
-          consecutiveEmptyReads++;
-          if (consecutiveEmptyReads >= 3) break;
-          continue;
+      // Entries, references and intermediate responses may precede SearchResultDone (RFC 4511 4.5.2).
+      searchResult = await inPhase('Search', async () => {
+        for (;;) {
+          const response = await nextResponse(nextMessage, MESSAGE_ID.search);
+          switch (response.opTag) {
+            case LDAP_TAG.searchResultEntry:
+              entries++;
+              break;
+            case LDAP_TAG.searchResultReference:
+            case LDAP_TAG.intermediateResponse:
+              break;
+            case LDAP_TAG.searchResultDone:
+              return decodeLdapResult(response);
+            default:
+              throw new Error(`unexpected response tag 0x${response.opTag.toString(16)}`);
+          }
         }
-
-        consecutiveEmptyReads = 0;
-        searchChunks.push(chunk);
-        totalBytesRead += chunk.length;
-
-        if (totalBytesRead > MAX_RESPONSE_SIZE) {
-          throw new Error('Search response too large - possible protocol error');
-        }
-
-        if (expected === undefined) {
-          expected = 0;
-          const cd = safeBufferConcat(searchChunks);
-          const len = cd && parseBerLength(cd, 1);
-          if (len) expected = 1 + len.bytesUsed + len.length;
-        }
-
-        if (expected) {
-          if (totalBytesRead >= expected) break;
-        } else if (expected === 0 && totalBytesRead > 10) {
-          const cd = safeBufferConcat(searchChunks);
-          if (cd && findSearchDoneIndex(cd) !== -1) break;
-        }
-      }
+      });
       metrics.searchEnd = Date.now();
-      searchRsp = safeBufferConcat(searchChunks);
     } finally {
       markers.stop('ldap-search');
     }
 
     const searchRTT = metrics.searchEnd - metrics.searchStart;
-    
     if (debugMode) {
-      console.log(`Debug: Search RTT: ${searchRTT} ms`);
+      console.log(`Debug: Search RTT: ${searchRTT} ms, ${entries} entr${entries === 1 ? 'y' : 'ies'}, result code ${searchResult.resultCode}`);
     }
 
-    /* Search response validation */
-    if (!searchRsp || !searchRsp.length) {
-      throw new Error('Search failed: No response received from server');
-    }
-    
-    if (debugMode) {
-      console.log(`Debug: Received search response: ${searchRsp.length} bytes`);
-    }
-    
-    // Basic response validation
-    if (debugMode && searchRsp.length > 8) {
-      console.log(`Debug: Search response type at [8]: 0x${toHex(searchRsp[8])} (${searchRsp[8]})`);
+    if (searchResult.resultCode !== 0) {
+      throw new Error(`Search failed: ${formatLdapResult(searchResult)}`);
     }
 
-    // Check for LDAP message structure: 0x30 (SEQUENCE) at start
-    if (searchRsp.length > 0 && searchRsp[0] !== 0x30) {
-      throw new Error(`Search failed: Invalid LDAP message format - expected SEQUENCE (0x30), got 0x${toHex(searchRsp[0])}`);
-    }
-    const top = parseBerLength(searchRsp, 1);
-    if (!top) throw new Error('Search failed: Invalid top-level length');
-    const end = 1 + top.bytesUsed + top.length;
-    if (end > searchRsp.length) {
-      throw new Error(`Search failed: Top-level length ${end} exceeds response size ${searchRsp.length}`);
-    } else if (end !== searchRsp.length && debugMode) {
-      console.log(`Debug: Extra data after LDAP message: ${searchRsp.length - end} bytes`);
-    }
-
-    // Simplified search response validation
-    let firstTagPos = 8;
-    if (searchRsp.length > 8) {
-      let pos = 8;
-      let responseType = searchRsp[pos];
-
-      // Skip SearchResultReference (0x73), intermediateResponse (0x79)
-      // and context-specific tags (0xA0-0xBF)
-      while (
-        responseType === 0x73 ||
-        responseType === 0x79 ||
-        (responseType >= 0xa0 && responseType <= 0xbf)
-      ) {
-        const skipInfo = parseBerLength(searchRsp, pos + 1);
-        if (!skipInfo) break;
-        if (debugMode) {
-          console.log(`Debug: Skipping tag 0x${toHex(responseType)}`);
-        }
-        pos += 1 + skipInfo.bytesUsed + skipInfo.length;
-        if (pos >= searchRsp.length) break;
-        responseType = searchRsp[pos];
-      }
-      firstTagPos = pos;
-
-      if (debugMode) {
-        console.log(`Debug: Search response type: 0x${toHex(responseType)} (${searchRsp.length} bytes)`);
-      }
-
-      // Handle main response types
-      if (responseType === 0x65) {
-        // SearchResultDone - this is what we expect for base scope
-        if (debugMode) console.log('Debug: SearchResultDone received');
-      } else if (responseType === 0x64) {
-        // SearchResultEntry - also valid, means we found the entry
-        if (debugMode) console.log('Debug: SearchResultEntry received');
-      } else if (responseType === 0x82) {
-        // 0x82 response - likely RHDS SearchResultEntry data
-        // Look for SearchResultDone (0x65) anywhere in the response
-        let foundSearchResultDone = false;
-        for (let i = 0; i < searchRsp.length - 10; i++) {
-          if (searchRsp[i] === 0x65) {
-            const lengthInfo = parseBerLength(searchRsp, i + 1);
-            if (lengthInfo) {
-              const resultCodePos = i + 1 + lengthInfo.bytesUsed;
-              if (resultCodePos < searchRsp.length) {
-                const resultCode = searchRsp[resultCodePos];
-                                if (resultCode === 0x00) {
-                    foundSearchResultDone = true;
-                    break;
-                  } else if (isProxyCorruption(resultCode, searchRsp, resultCodePos)) {
-                    console.log('ThousandEyes Environment: LDAP response corrupted, treating as success');
-                    foundSearchResultDone = true;
-                    break;
-                  } else {
-                    const errorMsg = getLdapErrorMessage(resultCode);
-                    throw new Error(`Search failed: ${errorMsg}`);
-                  }
-              }
-            }
-          }
-        }
-        
-        // RHDS specific - treat as success if bind worked (fallback for RHDS format)
-        if (!foundSearchResultDone && debugMode) {
-          console.log('Debug: 0x82 response - treating as RHDS success');
-        }
-        
-        // Complete successfully for 0x82 responses
-        const totalTime = metrics.searchEnd - metrics.connectionStart;
-        const connectionTime = metrics.connectionEnd - metrics.connectionStart;
-        console.log(`LDAP Monitor: PASS - Total ${totalTime}ms (connect: ${connectionTime}ms, bind: ${bindRTT}ms, search: ${searchRTT}ms)`);
-        return;
-      } else if (responseType === 0x06) {
-        // Check for result code in 0x06 response
-        let foundResultCode = null;
-        for (let i = firstTagPos; i < searchRsp.length && i < firstTagPos + 22; i++) {
-          if (searchRsp[i] === 0x0A && i + 1 < searchRsp.length) {
-            foundResultCode = searchRsp[i + 1];
-                break;
-              }
-            }
-            
-        if (foundResultCode !== 0x00) {
-          throw new Error(`Search failed: Non-standard response (0x06). Consider using bind-only mode.`);
-        }
-          } else {
-        // Handle other response types with simple error
-        if (responseType === 0xbe) {
-          throw new Error(`Search failed: Invalid DN syntax or insufficient access rights`);
-        } else if (responseType === 0x01) {
-          throw new Error(`Search failed: Operations error`);
-            } else {
-          throw new Error(`Search failed: Unexpected response type 0x${toHex(responseType)}`);
-        }
-
-
-      }
-    }
-
-    const doneIndex = findSearchDoneIndex(searchRsp);
-    
-    // SearchResultDone analysis (silent unless debug mode)
-    if (debugMode) {
-      console.log(`Debug: SearchResultDone analysis - length: ${searchRsp.length}, index: ${doneIndex}`);
-    }
-    
-    if (doneIndex === -1) {
-      // If SearchResultDone wasn't found, check first tag position
-      if (searchRsp.length > firstTagPos && searchRsp[firstTagPos] === 0x65) {
-        if (debugMode) console.log(`Debug: SearchResultDone found at position ${firstTagPos}`);
-
-        const directLengthInfo = parseBerLength(searchRsp, firstTagPos + 1);
-        if (directLengthInfo) {
-          const directResultCodePos = firstTagPos + 1 + directLengthInfo.bytesUsed;
-          if (searchRsp.length > directResultCodePos) {
-            const directResultCode = searchRsp[directResultCodePos];
-            if (debugMode) {
-              console.log(`Debug: Direct result code: 0x${toHex(directResultCode)} (${directResultCode})`);
-            }
-            if (directResultCode !== 0x00) {
-              if (isProxyCorruption(directResultCode, searchRsp, directResultCodePos)) {
-                reportProxySuccess(metrics, bindRTT, searchRTT);
-                return;
-              } else {
-                const errorMsg = getLdapErrorMessage(directResultCode);
-                throw new Error(`Search failed: ${errorMsg}`);
-              }
-            }
-          }
-        }
-      } else {
-        throw new Error(`Search failed: No valid SearchResultDone found in response`);
-      }
-    } else {
-      // Parse BER length to find correct result code position
-      const resultLengthInfo = parseBerLength(searchRsp, doneIndex + 1);
-      if (!resultLengthInfo) {
-        throw new Error(`Search failed: Invalid BER length encoding in SearchResultDone at position ${doneIndex + 1}`);
-      }
-      
-      const resultCodePos = doneIndex + 1 + resultLengthInfo.bytesUsed;
-      if (resultCodePos >= searchRsp.length) {
-        throw new Error(`Search failed: Result code position ${resultCodePos} exceeds response length ${searchRsp.length}`);
-      }
-      
-      const searchResultCode = searchRsp[resultCodePos];
-      
-      if (debugMode) {
-        console.log(`Debug: Search result code: 0x${toHex(searchResultCode)} (${searchResultCode})`);
-      }
-    if (searchResultCode !== 0x00) {
-        if (isProxyCorruption(searchResultCode, searchRsp, resultCodePos)) {
-          reportProxySuccess(metrics, bindRTT, searchRTT);
-          return;
-        } else {
-          const errorMsg = getLdapErrorMessage(searchResultCode);
-          throw new Error(`Search failed: ${errorMsg}`);
-        }
-      }
-    }
-    
     if (searchRTT > slowMs) {
       throw new Error(`Slow search: ${searchRTT} ms (>${slowMs}ms threshold)`);
     }
 
     // Final performance summary (visible in GUI)
-      const totalTime = metrics.searchEnd - metrics.connectionStart;
+    const totalTime = metrics.searchEnd - metrics.connectionStart;
     const connectionTime = metrics.connectionEnd - metrics.connectionStart;
     console.log(`LDAP Monitor: PASS - Total ${totalTime}ms (connect: ${connectionTime}ms, bind: ${bindRTT}ms, search: ${searchRTT}ms)`);
 
   } finally {
-    /* Ensure socket is always closed */
+    /* End the LDAP session (RFC 4511 4.3), then close the socket */
+    try {
+      await sock.writeAll(ldapMessage(MESSAGE_ID.unbind, unbindRequest()));
+    } catch {
+      // The server may already have closed the connection
+    }
     if (sock && typeof sock.end === 'function') {
       try {
         await sock.end();

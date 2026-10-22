@@ -50,13 +50,13 @@ describe('389 Directory Server', { skip: configured ? false : 'run via npm run t
     assert.equal(result.verdict, 'fail');
   });
 
-  it('reaches a search pass without the "response corruption" fallback (B2/S1)', { todo: 'B2: pass comes from the corruption heuristic' }, async () => {
+  it('reaches a search pass without the "response corruption" fallback (B2/S1)', async () => {
     const result = await run({});
     assert.equal(result.verdict, 'pass');
     assert.doesNotMatch(result.stdout, /corrupt/i);
   });
 
-  it('does not receive the account password hash in the search response (S3)', { todo: 'S3: search requests all user attributes' }, async () => {
+  it('does not receive the account password hash in the search response (S3)', async () => {
     const result = await run({});
     const received = eventsOf(result, 'rx').map((e) => Buffer.from(e.hex, 'hex').toString('latin1')).join('');
     assert.doesNotMatch(received, /userPassword/i);
