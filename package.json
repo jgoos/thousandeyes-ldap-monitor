@@ -1,11 +1,14 @@
 {
   "name": "thousandeyes-ldap-monitor",
   "version": "1.0.0",
+  "private": true,
+  "type": "module",
   "description": "Self-contained ThousandEyes script that performs LDAP/LDAPS bind + search operations and alerts on latency. Only ldap-monitor.js is used in ThousandEyes platform.",
   "main": "ldap-monitor.js",
   "scripts": {
-    "test": "echo \"Note: This script is designed to run within ThousandEyes platform\" && exit 0",
-    "lint": "echo \"Add your linting tool here\"",
+    "lint": "eslint .",
+    "test": "node --test test/*.test.js",
+    "test:integration": "test/integration/run-389ds.sh",
     "validate": "node --check ldap-monitor.js"
   },
   "keywords": [
@@ -20,9 +23,13 @@
   "author": "",
   "license": "MIT",
   "engines": {
-    "node": ">=14.0.0"
+    "node": ">=22.15.0"
   },
-  "devDependencies": {},
+  "devDependencies": {
+    "@eslint/js": "10.0.1",
+    "eslint": "10.13.0",
+    "globals": "17.13.0"
+  },
   "repository": {
     "type": "git",
     "url": "https://github.com/jgoos/thousandeyes-ldap-monitor.git"
@@ -35,4 +42,4 @@
     "ldap-monitor-config.example.js",
     "README.md"
   ]
-} 
+}
