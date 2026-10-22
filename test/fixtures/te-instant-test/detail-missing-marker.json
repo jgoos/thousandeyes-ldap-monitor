@@ -1,0 +1,19 @@
+{
+  "results": [
+    {
+      "date": "2026-10-16T21:00:12Z",
+      "roundId": 1792184400,
+      "agent": { "agentId": "125", "agentName": "Example Enterprise Agent" },
+      "componentErrors": 0,
+      "transactionTime": 180,
+      "errorDetails": "",
+      "markers": [
+        { "name": "ldap-attempt-1", "duration": 38 },
+        { "name": "ldaps-ssl-handshake", "duration": 38 },
+        { "name": "ldap-bind", "duration": 11 }
+      ],
+      "pages": []
+    }
+  ],
+  "test": { "testId": "7012345", "type": "web-transactions" }
+}

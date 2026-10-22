@@ -1,0 +1,20 @@
+{
+  "results": [
+    {
+      "date": "2026-10-16T21:00:12Z",
+      "roundId": 1792184400,
+      "agent": { "agentId": "125", "agentName": "Example Enterprise Agent" },
+      "componentErrors": 0,
+      "transactionTime": 230,
+      "errorType": "Transaction",
+      "errorDetails": "Error: Authentication failed: invalidCredentials (49)",
+      "markers": [
+        { "name": "ldap-attempt-1", "duration": 40 },
+        { "name": "ldaps-ssl-handshake", "duration": 40 },
+        { "name": "ldap-bind", "duration": 15 }
+      ],
+      "pages": []
+    }
+  ],
+  "test": { "testId": "7012345", "type": "web-transactions" }
+}

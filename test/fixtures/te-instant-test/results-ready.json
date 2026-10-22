@@ -1,0 +1,16 @@
+{
+  "results": [
+    {
+      "date": "2026-10-16T21:00:12Z",
+      "roundId": 1792184400,
+      "startTime": 1792184400,
+      "endTime": 1792184401,
+      "agent": { "agentId": "125", "agentName": "Example Enterprise Agent", "countryId": "NL", "location": "Amsterdam, Netherlands" },
+      "componentErrors": 0,
+      "transactionTime": 412,
+      "_links": { "appLink": { "href": "https://app.thousandeyes.com/view/tests/?testId=7012345" } }
+    }
+  ],
+  "test": { "testId": "7012345", "type": "web-transactions" },
+  "_links": { "self": { "href": "https://api.thousandeyes.com/v7/test-results/7012345/web-transactions" } }
+}
